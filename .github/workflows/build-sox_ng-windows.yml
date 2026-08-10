@@ -119,8 +119,14 @@ jobs:
       # men kun ved at omskrive eksisterende -I-flag, og MSYS2 har opus liggende
       # i en standard-includesti uden -I. Uden pkg-config-flaget her ryger opus
       # lydløst ud af buildet.
+      #
+      # LIBS: configure tester lame med et bart "-lmp3lame", og siden LAME 4.0
+      # bruger libmpg123, fejler den testlinkning på mpg123-symboler — hvorefter
+      # lame lydløst udgår af buildet. mpg123 og dets shlwapi skal derfor være
+      # tilgængelige allerede under configure, ikke først ved den rigtige link.
       - name: Configure
         run: |
+          set -o pipefail   # så en fejl i configure ikke skjules af tee
           cd "$SRC"
           ./configure \
             --disable-shared --enable-static \
@@ -130,8 +136,30 @@ jobs:
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
             CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC $(pkg-config --cflags opusfile)" \
-            LDFLAGS="-static-libgcc"
-          echo "=== configure-opsummering ovenfor viser hvilke formater der kom med ==="
+            LIBS="-lmpg123 -lshlwapi" \
+            LDFLAGS="-static-libgcc" 2>&1 | tee configure.out
+
+      # Et bibliotek der ikke kan findes får ikke configure til at fejle — det
+      # udgår bare af opsummeringen, og det opdages først når exe'en mangler et
+      # format. Både opus og lame er røget ud den vej. Her fejler buildet i
+      # stedet med det samme og siger hvad der mangler.
+      - name: Kontrollér at alle formater kom med
+        run: |
+          cd "$SRC"
+          mangler=""
+          for f in flac gsm lpc10 "mp1/mp2/mp3" id3tag lame mad twolame \
+                   oggvorbis opus wavpack amrnb amrwb waveaudio; do
+            linje=$(grep -E "^ ?$f[ .]" configure.out | head -1 || true)
+            case "$linje" in
+              *yes*) echo "ok:      $linje" ;;
+              *)     echo "MANGLER: $f  [${linje:-ingen linje i opsummeringen}]"
+                     mangler="$mangler $f" ;;
+            esac
+          done
+          if [ -n "$mangler" ]; then
+            echo "Disse kom ikke med:$mangler"
+            exit 1
+          fi
 
       # Det vigtige trick: libtool sluger et almindeligt "-static" og linker
       # alligevel libgomp/libwinpthread dynamisk. libtools eget "-all-static"
