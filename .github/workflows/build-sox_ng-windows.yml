@@ -65,6 +65,14 @@ jobs:
       # --without-sndfile: libsndfile.a har sin egen GSM 06.10 med præcis de
       # samme symbolnavne som libgsm, og sox linker altid gsm (wav.c bruger det
       # til WAV GSM 6.10). Statisk kan der kun være én af dem i exe'en.
+      #
+      # opusfile.h laver #include <opus_multistream.h> i stedet for
+      # <opus/opus_multistream.h>, så headeren kun kan oversættes med
+      # include/opus i søgestien. configure.ac forsøger selv at rette op på det,
+      # men kun ved at omskrive eksisterende -I-flag, og MSYS2 har opus liggende
+      # i en standard-includesti uden -I. Uden pkg-config-flaget her ryger opus
+      # lydløst ud af buildet. OPUS_LIBS sættes samtidig, fordi configure ellers
+      # ender med "-lopus -lopusfile" — forkert rækkefølge for statisk link.
       - name: Configure
         run: |
           cd "$SRC"
@@ -75,7 +83,8 @@ jobs:
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
-            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC $(pkg-config --cflags opusfile)" \
+            OPUS_LIBS="$(pkg-config --static --libs opusfile)" \
             LDFLAGS="-static-libgcc"
           echo "=== configure-opsummering ovenfor viser hvilke formater der kom med ==="
 
