@@ -40,7 +40,6 @@ jobs:
             mingw-w64-x86_64-libvorbis
             mingw-w64-x86_64-opus
             mingw-w64-x86_64-opusfile
-            mingw-w64-x86_64-libsndfile
             mingw-w64-x86_64-wavpack
             mingw-w64-x86_64-twolame
             mingw-w64-x86_64-libid3tag
@@ -58,15 +57,25 @@ jobs:
 
       # --enable-replace laver kun links ved "make install", som vi ikke kører,
       # så exe'en omdøbes i stedet efter build (se nedenfor).
+      #
+      # CPPFLAGS: FLAC og twolame erklærer deres API som __declspec(dllimport)
+      # med mindre man selv definerer FLAC__NO_DLL / LIBTWOLAME_STATIC. Uden dem
+      # leder linkeren efter __imp_FLAC__* i .a-filerne og finder ingenting.
+      #
+      # --without-sndfile: libsndfile.a har sin egen GSM 06.10 med præcis de
+      # samme symbolnavne som libgsm, og sox linker altid gsm (wav.c bruger det
+      # til WAV GSM 6.10). Statisk kan der kun være én af dem i exe'en.
       - name: Configure
         run: |
           cd "$SRC"
           ./configure \
             --disable-shared --enable-static \
             --without-ao --without-pulseaudio --without-alsa --without-oss --without-sndio \
+            --without-sndfile \
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC" \
             LDFLAGS="-static-libgcc"
           echo "=== configure-opsummering ovenfor viser hvilke formater der kom med ==="
 
