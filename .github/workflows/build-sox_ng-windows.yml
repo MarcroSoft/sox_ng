@@ -1,0 +1,105 @@
+name: sox_ng statisk Windows-build
+
+# Lagt i .github/workflows/ i et hvilket som helst GitHub-repo (må gerne være tomt/privat).
+# Kør den manuelt under fanen "Actions" -> "Run workflow".
+# Resultatet ligger bagefter som en zip under "Artifacts" nederst på kørslens side.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "sox_ng-version fra Codeberg-releases"
+        default: "14.8.0.1"
+      replace:
+        description: "Byg som sox.exe i stedet for sox_ng.exe"
+        type: boolean
+        default: false
+
+jobs:
+  win64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Opsæt MSYS2 + mingw64-toolchain og codec-biblioteker
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            wget
+            tar
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-libmad
+            mingw-w64-x86_64-lame
+            mingw-w64-x86_64-flac
+            mingw-w64-x86_64-libvorbis
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-opusfile
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-wavpack
+            mingw-w64-x86_64-twolame
+            mingw-w64-x86_64-libid3tag
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-opencore-amr
+            mingw-w64-x86_64-libgsm
+
+      - name: Hent kildekode
+        run: |
+          V="${{ github.event.inputs.version }}"
+          wget -q "https://codeberg.org/sox_ng/sox_ng/releases/download/sox_ng-$V/sox_ng-$V.tar.gz"
+          tar xzf "sox_ng-$V.tar.gz"
+          echo "SRC=sox_ng-$V" >> $GITHUB_ENV
+
+      - name: Configure
+        run: |
+          cd "$SRC"
+          EXTRA=""
+          if [ "${{ github.event.inputs.replace }}" = "true" ]; then EXTRA="--enable-replace"; fi
+          ./configure \
+            --disable-shared --enable-static $EXTRA \
+            --without-ao --without-pulseaudio --without-alsa --without-oss --without-sndio \
+            --with-waveaudio \
+            --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
+            PKG_CONFIG="pkg-config --static" \
+            LDFLAGS="-static-libgcc"
+          echo "=== configure-opsummering ovenfor viser hvilke formater der kom med ==="
+
+      # Det vigtige trick: libtool sluger et almindeligt "-static" og linker
+      # alligevel libgomp/libwinpthread dynamisk. libtools eget "-all-static"
+      # ved make-tid er det der faktisk giver en selvstændig exe.
+      - name: Byg fuldt statisk
+        run: |
+          cd "$SRC"
+          make -j$(nproc) LDFLAGS="-all-static"
+          strip src/*.exe || true
+
+      - name: Verificér at der kun er system-DLL'er tilbage
+        run: |
+          cd "$SRC"
+          for f in src/sox*.exe; do
+            echo "### $f"
+            objdump -p "$f" | grep -i "DLL Name" | sort -u
+          done
+          echo "Kun KERNEL32/WINMM/msvcrt/ADVAPI32 og lign. = fuldt statisk."
+
+      - name: Kør en hurtig røgtest
+        run: |
+          cd "$SRC"
+          ./src/sox*.exe --version || true
+          ./src/sox*.exe -n -r 44100 -c 2 test.wav synth 1 sine 440 vol 0.5
+          ls -la test.wav
+
+      - name: Upload færdig exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: sox_ng-win64-static
+          path: |
+            ${{ env.SRC }}/src/*.exe
+            ${{ env.SRC }}/COPYING
+            ${{ env.SRC }}/ChangeLog
