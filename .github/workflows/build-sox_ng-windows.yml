@@ -80,6 +80,9 @@ jobs:
           echo "=== installeret (kun .a og .la, ingen .dll.a fra 3.100) ==="
           ls -la /mingw64/lib/libmp3lame.* /mingw64/include/lame/lame.h
           grep -o "dependency_libs=.*" /mingw64/lib/libmp3lame.la
+          # version.c lægger "LAME4.0" som fast streng i arkivet; fejler her
+          # hvis det alligevel blev en anden udgave der endte i /mingw64.
+          strings /mingw64/lib/libmp3lame.a | grep -oE "LAME[0-9]+\.[0-9]+" | sort -u
 
       - name: Hent kildekode
         run: |
@@ -154,8 +157,11 @@ jobs:
           cd "$SRC"
           objdump -p "src/$EXE" | grep -i "DLL Name" | sort -u
           echo "Kun KERNEL32/WINMM/msvcrt/SHELL32/SHLWAPI og lign. = fuldt statisk."
-          echo "=== indbygget LAME-version ==="
-          strings "src/$EXE" | grep -oE "LAME[0-9]+\.[0-9]+[a-z0-9.]*" | sort -u
+          # Kun oplysende: versionsstrengen sidder i version.o, og det statiske
+          # link trækker kun de arkivmedlemmer ind, der faktisk bruges, så den
+          # behøver ikke være med. Selve versionskontrollen sker på biblioteket.
+          echo "=== LAME-versionsstreng i exe'en, hvis den er trukket med ==="
+          strings "src/$EXE" | grep -oE "LAME[0-9]+\.[0-9]+" | sort -u || echo "(ikke til stede)"
 
       - name: Kør en hurtig røgtest
         run: |
