@@ -47,7 +47,7 @@ jobs:
             mingw-w64-x86_64-libpng
             mingw-w64-x86_64-fftw
             mingw-w64-x86_64-opencore-amr
-            mingw-w64-x86_64-libgsm
+            mingw-w64-x86_64-gsm
 
       - name: Hent kildekode
         run: |
@@ -56,13 +56,13 @@ jobs:
           tar xzf "sox_ng-$V.tar.gz"
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
+      # --enable-replace laver kun links ved "make install", som vi ikke kører,
+      # så exe'en omdøbes i stedet efter build (se nedenfor).
       - name: Configure
         run: |
           cd "$SRC"
-          EXTRA=""
-          if [ "${{ github.event.inputs.replace }}" = "true" ]; then EXTRA="--enable-replace"; fi
           ./configure \
-            --disable-shared --enable-static $EXTRA \
+            --disable-shared --enable-static \
             --without-ao --without-pulseaudio --without-alsa --without-oss --without-sndio \
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
@@ -77,22 +77,29 @@ jobs:
         run: |
           cd "$SRC"
           make -j$(nproc) LDFLAGS="-all-static"
-          strip src/*.exe || true
+          strip src/sox_ng.exe
+          if [ "${{ github.event.inputs.replace }}" = "true" ]; then
+            mv src/sox_ng.exe src/sox.exe
+            echo "EXE=sox.exe" >> $GITHUB_ENV
+          else
+            echo "EXE=sox_ng.exe" >> $GITHUB_ENV
+          fi
+
+      - name: Vis configure-log hvis noget gik galt
+        if: failure()
+        run: tail -n 60 "$SRC/config.log" || true
 
       - name: Verificér at der kun er system-DLL'er tilbage
         run: |
           cd "$SRC"
-          for f in src/sox*.exe; do
-            echo "### $f"
-            objdump -p "$f" | grep -i "DLL Name" | sort -u
-          done
+          objdump -p "src/$EXE" | grep -i "DLL Name" | sort -u
           echo "Kun KERNEL32/WINMM/msvcrt/ADVAPI32 og lign. = fuldt statisk."
 
       - name: Kør en hurtig røgtest
         run: |
           cd "$SRC"
-          ./src/sox*.exe --version || true
-          ./src/sox*.exe -n -r 44100 -c 2 test.wav synth 1 sine 440 vol 0.5
+          "./src/$EXE" --version || true
+          "./src/$EXE" -n -r 44100 -c 2 test.wav synth 1 sine 440 vol 0.5
           ls -la test.wav
 
       - name: Upload færdig exe
