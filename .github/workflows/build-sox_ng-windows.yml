@@ -49,12 +49,23 @@ jobs:
 
       # MSYS2 pakker stadig lame 3.100 (bygget i 2023), så 4.0 hentes fra kilde
       # og installeres i /mingw64, hvor configure finder den af sig selv.
+      #
+      # 3.100 skal først af vejen: den kommer ind som afhængighed af libsndfile,
+      # der selv følger med toolchainen, og efterlader ellers en importbibliotek
+      # som configure ville teste imod i stedet for det 4.0 vi rent faktisk
+      # linker. -dd fordi libsndfile stadig peger på den, og vi bruger den ikke.
+      #
       # Kun biblioteket: frontend-programmet bruger sox ikke, og det er netop
       # dér 4.0's AIFF-parser-rettelse sidder. --enable-decoder er default, men
-      # står eksplicit her, fordi sox' mp3-hip.c afhænger af hip_*-API'et.
+      # står eksplicit, fordi sox' mp3-hip.c afhænger af hip_*-API'et — som i
+      # 4.0 ikke længere er lames egen mpglib, men et eksternt libmpg123.
+      # Derfor også PKG_CONFIG=--static: uden den ender libmp3lame.la med
+      # "-lmpg123" alene, og mpg123's eget -lshlwapi mangler i sox' link.
+      #
       # sha256 er den samme, som Homebrew opgiver for 4.0.
       - name: Byg LAME 4.0 statisk
         run: |
+          pacman -Rdd --noconfirm mingw-w64-x86_64-lame || true
           LAME=lame-4.0
           wget -q "https://downloads.sourceforge.net/lame/$LAME.tar.gz"
           echo "3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb  $LAME.tar.gz" | sha256sum -c -
@@ -62,11 +73,13 @@ jobs:
           cd "$LAME"
           ./configure --prefix=/mingw64 \
             --disable-shared --enable-static \
-            --disable-frontend --enable-decoder
+            --disable-frontend --enable-decoder \
+            PKG_CONFIG="pkg-config --static"
           make -j$(nproc)
           make install
-          echo "=== installeret ==="
+          echo "=== installeret (kun .a og .la, ingen .dll.a fra 3.100) ==="
           ls -la /mingw64/lib/libmp3lame.* /mingw64/include/lame/lame.h
+          grep -o "dependency_libs=.*" /mingw64/lib/libmp3lame.la
 
       - name: Hent kildekode
         run: |
@@ -140,7 +153,7 @@ jobs:
         run: |
           cd "$SRC"
           objdump -p "src/$EXE" | grep -i "DLL Name" | sort -u
-          echo "Kun KERNEL32/WINMM/msvcrt/ADVAPI32 og lign. = fuldt statisk."
+          echo "Kun KERNEL32/WINMM/msvcrt/SHELL32/SHLWAPI og lign. = fuldt statisk."
           echo "=== indbygget LAME-version ==="
           strings "src/$EXE" | grep -oE "LAME[0-9]+\.[0-9]+[a-z0-9.]*" | sort -u
 
