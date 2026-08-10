@@ -35,7 +35,6 @@ jobs:
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-libmad
-            mingw-w64-x86_64-lame
             mingw-w64-x86_64-flac
             mingw-w64-x86_64-libvorbis
             mingw-w64-x86_64-opus
@@ -47,6 +46,27 @@ jobs:
             mingw-w64-x86_64-fftw
             mingw-w64-x86_64-opencore-amr
             mingw-w64-x86_64-gsm
+
+      # MSYS2 pakker stadig lame 3.100 (bygget i 2023), så 4.0 hentes fra kilde
+      # og installeres i /mingw64, hvor configure finder den af sig selv.
+      # Kun biblioteket: frontend-programmet bruger sox ikke, og det er netop
+      # dér 4.0's AIFF-parser-rettelse sidder. --enable-decoder er default, men
+      # står eksplicit her, fordi sox' mp3-hip.c afhænger af hip_*-API'et.
+      # sha256 er den samme, som Homebrew opgiver for 4.0.
+      - name: Byg LAME 4.0 statisk
+        run: |
+          LAME=lame-4.0
+          wget -q "https://downloads.sourceforge.net/lame/$LAME.tar.gz"
+          echo "3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb  $LAME.tar.gz" | sha256sum -c -
+          tar xzf "$LAME.tar.gz"
+          cd "$LAME"
+          ./configure --prefix=/mingw64 \
+            --disable-shared --enable-static \
+            --disable-frontend --enable-decoder
+          make -j$(nproc)
+          make install
+          echo "=== installeret ==="
+          ls -la /mingw64/lib/libmp3lame.* /mingw64/include/lame/lame.h
 
       - name: Hent kildekode
         run: |
@@ -121,6 +141,8 @@ jobs:
           cd "$SRC"
           objdump -p "src/$EXE" | grep -i "DLL Name" | sort -u
           echo "Kun KERNEL32/WINMM/msvcrt/ADVAPI32 og lign. = fuldt statisk."
+          echo "=== indbygget LAME-version ==="
+          strings "src/$EXE" | grep -oE "LAME[0-9]+\.[0-9]+[a-z0-9.]*" | sort -u
 
       - name: Kør en hurtig røgtest
         run: |
