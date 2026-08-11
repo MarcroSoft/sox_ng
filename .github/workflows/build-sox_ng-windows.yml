@@ -39,6 +39,7 @@ jobs:
             mingw-w64-x86_64-libvorbis
             mingw-w64-x86_64-opus
             mingw-w64-x86_64-opusfile
+            mingw-w64-x86_64-libopusenc
             mingw-w64-x86_64-wavpack
             mingw-w64-x86_64-twolame
             mingw-w64-x86_64-libid3tag
@@ -91,6 +92,34 @@ jobs:
           tar xzf "sox_ng-$V.tar.gz"
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
+      # sox_ng har haft native opus-encoding (libopusenc) i main siden oktober
+      # 2025, men ingen release har den endnu: i 14.8.0.1 står der stadig NULL
+      # i handlerens tre skrive-slots, så .opus kun kan læses. Læsedelen af
+      # src/opus.c er linje for linje den samme i main og i releasen, så filen
+      # kan skiftes ud hel og holden. Resten af encoderen sidder bag
+      # #if HAVE_OPUSENC, som vi definerer i CPPFLAGS nedenfor — så slipper vi
+      # for at køre autoreconf på et udgivet træ.
+      #
+      # Pinnet til en commit frem for main, så et upstream-commit ikke ændrer
+      # buildet uden varsel, og med sha256 på filens indhold ligesom LAME.
+      - name: Backport opus-encoding fra sox_ng main
+        run: |
+          cd "$SRC"
+          # Den dag en release selv får encoderen med, skal dette trin og de to
+          # opusenc-flag i Configure væk igen. Så er det bedre at fejle her end
+          # at overskrive en nyere opus.c med den fra main. Testen står på det
+          # genererede configure frem for configure.ac, fordi det er det der rent
+          # faktisk køres — og fordi trinnet nedenfor allerede regner med det.
+          if grep -q HAVE_OPUSENC configure; then
+            echo "sox_ng-${{ github.event.inputs.version }} har selv opus-encoding."
+            echo "Fjern dette trin samt -DHAVE_OPUSENC og -lopusenc i Configure."
+            exit 1
+          fi
+          OPUS_C=5caa22dfc66fea186594cf20c96db2b1362ec00a
+          wget -q -O src/opus.c \
+            "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
+          echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
+
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
       # ld scanner arkiverne fra venstre mod højre, og når libopusfile.a først er
@@ -124,6 +153,16 @@ jobs:
       # bruger libmpg123, fejler den testlinkning på mpg123-symboler — hvorefter
       # lame lydløst udgår af buildet. mpg123 og dets shlwapi skal derfor være
       # tilgængelige allerede under configure, ikke først ved den rigtige link.
+      #
+      # -DHAVE_OPUSENC tænder encoderen i den backportede opus.c. Releasens
+      # configure kender ikke libopusenc og skriver derfor ingenting om den i
+      # soxconfig.h, så #if HAVE_OPUSENC ville ellers stå tom. opusenc.h ligger
+      # i include/opus/ og er allerede dækket af --cflags opusfile ovenfor.
+      #
+      # -lopusenc -lopus i LIBS: LIBS lægges sidst på linkerlinjen, og
+      # libopusenc kalder ind i libopus. Statisk scanner ld arkiverne fra
+      # venstre, så OPUS_LIBS' eget -lopus er forlængst passeret, når
+      # libopusenc.a trækkes ind — derfor skal -lopus gentages bagefter.
       - name: Configure
         run: |
           set -o pipefail   # så en fejl i configure ikke skjules af tee
@@ -135,8 +174,8 @@ jobs:
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
-            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC $(pkg-config --cflags opusfile)" \
-            LIBS="-lmpg123 -lshlwapi" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $(pkg-config --cflags opusfile)" \
+            LIBS="-lmpg123 -lshlwapi -lopusenc -lopus" \
             LDFLAGS="-static-libgcc" 2>&1 | tee configure.out
 
       # Et bibliotek der ikke kan findes får ikke configure til at fejle — det
@@ -206,6 +245,17 @@ jobs:
           # argv[0] — så den her viser både at kopien kører, og at den stadig
           # opfører sig som soxi og ikke som sox.
           ./src/soxi_ng.exe test.wav
+          # Opus-encodingen er det eneste her, der ikke kommer fra releasen, og
+          # den har ingen linje i configures opsummering at tjekke imod. Manglede
+          # skrive-slottene, ville sox_ng nægte at åbne .opus som output, så
+          # rundturen wav -> opus -> wav er det der beviser at backporten
+          # virkede. -r 48000 fordi opus-handleren kun tager 8/12/16/24/48 kHz;
+          # sox_ng lægger selv et rate-effekt ind. -C 96 = 96 kbps CBR.
+          "./src/$EXE" test.wav -C 96 -r 48000 test.opus
+          ls -la test.opus
+          ./src/soxi_ng.exe test.opus
+          "./src/$EXE" test.opus test-rundtur.wav
+          ls -la test-rundtur.wav
 
       - name: Upload færdig exe
         uses: actions/upload-artifact@v4
