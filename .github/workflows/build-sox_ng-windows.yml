@@ -168,7 +168,12 @@ jobs:
         run: |
           cd "$SRC"
           make -j$(nproc) LDFLAGS="-all-static"
-          strip src/sox_ng.exe
+          # play_ng, rec_ng og soxi_ng laves af Makefilens "all:"-mål med
+          # $(LN_S), der uden symlinks falder tilbage på cp. De er altså fulde
+          # kopier, lavet før dette punkt, og skal strippes hver for sig —
+          # ellers ryger tre ustrippede kopier på 12 MB med i zip'en.
+          strip src/*.exe
+          ls -la src/*.exe
           if [ "${{ github.event.inputs.replace }}" = "true" ]; then
             mv src/sox_ng.exe src/sox.exe
             echo "EXE=sox.exe" >> $GITHUB_ENV
@@ -197,6 +202,10 @@ jobs:
           "./src/$EXE" --version || true
           "./src/$EXE" -n -r 44100 -c 2 test.wav synth 1 sine 440 vol 0.5
           ls -la test.wav
+          # soxi_ng er den strippede kopi, og den skifter kun opførsel på
+          # argv[0] — så den her viser både at kopien kører, og at den stadig
+          # opfører sig som soxi og ikke som sox.
+          ./src/soxi_ng.exe test.wav
 
       - name: Upload færdig exe
         uses: actions/upload-artifact@v4
