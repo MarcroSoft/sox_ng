@@ -23,6 +23,12 @@ jobs:
         shell: msys2 {0}
 
     steps:
+      # Selve buildet kommer fra en tarball, ikke herfra — men patches/ ligger
+      # i dette repo, så det skal checkes ud. Først i rækken, fordi checkout
+      # rydder arbejdskataloget.
+      - name: Hent dette repo (patches/)
+        uses: actions/checkout@v4
+
       - name: Opsæt MSYS2 + mingw64-toolchain og codec-biblioteker
         uses: msys2/setup-msys2@v2
         with:
@@ -119,6 +125,27 @@ jobs:
           wget -q -O src/opus.c \
             "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
           echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
+
+      # src/win32-glob.c opremser filer med FindFirstFileA, altså ANSI-udgaven
+      # af Windows-API'et, og får navnene tilbage i systemets ANSI-tegnsæt
+      # (CP1252 på en dansk maskine). Resten af sox_ng regner filnavne for
+      # UTF-8 — det er mingw-w64's CRT, der oversætter både argv og fopen den
+      # vej — så `sox_ng *.flac` fejler med "No such file or directory" på
+      # ethvert navn med æ, ø eller å i. Tegn, som ANSI-tegnsættet slet ikke
+      # har plads til, kommer tilbage som et bogstaveligt '?' og er tabt.
+      # Fejlen går begge veje: et mønster med danske tegn matcher ingenting.
+      #
+      # Patchen skifter til FindFirstFileW og konverterer selv til UTF-8.
+      # Meldt opstrøms? Nej — kun her indtil videre.
+      - name: Ret glob til UTF-8 (win32-glob.c)
+        run: |
+          cd "$SRC"
+          # --fuzz=0: driver kilden fra hinanden, skal det fejle her og ikke
+          # ende som en patch, der lander et tilfældigt sted.
+          # Relativ sti, ikke $GITHUB_WORKSPACE: den er en Windows-sti med
+          # backslashes, og dem æder bash som escape-tegn.
+          patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
+          grep -q FindFirstFileW src/win32-glob.c
 
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
@@ -256,6 +283,13 @@ jobs:
           ./src/soxi_ng.exe test.opus
           "./src/$EXE" test.opus test-rundtur.wav
           ls -la test-rundtur.wav
+          # Glob med danske tegn i navnet. Uden win32-glob-patchen får sox_ng
+          # navnet tilbage fra Windows i CP1252, mens dens egen fopen venter
+          # UTF-8, og det her fejler med "No such file or directory".
+          cp test.wav "røgtest æøå.wav"
+          "./src/$EXE" "røgtest*.wav" -n
+          # Og den anden vej: danske tegn i selve mønsteret.
+          "./src/$EXE" "røgtest æøå.*" -n
 
       - name: Upload færdig exe
         uses: actions/upload-artifact@v4

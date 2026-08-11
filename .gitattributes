@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Patches skal bevares byte for byte. De anvendes på en tarball med LF, så en
+# CRLF-udgave ville aldrig kunne matche kontekstlinjerne — og buildet kører på
+# en Windows-runner, hvor text=auto ellers ville lave netop den om.
+patches/*.patch -text
