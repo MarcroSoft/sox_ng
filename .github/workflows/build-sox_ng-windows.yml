@@ -126,22 +126,23 @@ jobs:
             "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
           echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
 
-      # opus.c afviser bitrates under 6 kbps, og det er sox_ng's egen husregel:
-      # libopus tager alt fra 500 bit/s og skifter selv til SILK og smalbånd,
-      # når raten falder, og opusenc har præcis samme 500 bit/s som eneste
-      # hårde grænse — dens "6 to 750 kbit/s per channel" står kun i en
-      # fejltekst. Patchen sætter gulvet til 1 kbps, som er det laveste, der
-      # kan udtrykkes, når trunc() har taget decimaldelen til complexity.
+      # opus.c's 6-256 kbps var sox_ng's egen husregel. libopus tager alt fra
+      # 500 bit/s og skifter selv til SILK og smalbånd, når raten falder;
+      # opusenc har samme 500 bit/s i bunden og 1024 kbps per kanal i toppen
+      # som sine eneste hårde grænser — dens "6 to 750 kbit/s per channel"
+      # står kun i en fejltekst. Patchen overtager opusencs interval.
       #
-      # Loftet på 256 kbps er urørt: opusenc går højere, men det er en anden
-      # diskussion end den her.
+      # Gulvet bliver 1 kbps, det laveste der kan udtrykkes, når trunc() har
+      # taget decimaldelen til complexity. Loftet forsvinder ikke helt: over
+      # 300 kbps per kanal klamper libopus alligevel selv, og uden en øvre
+      # grænse ville et stort nok -C løbe opus_int32 over.
       #
       # Ligger efter backporten, så sha256'en tjekker den urørte fil.
-      - name: Tillad lave opus-bitrates (-C -1)
+      - name: Udvid opus' bitrate-interval (-C -1 og opad)
         run: |
           cd "$SRC"
-          patch -p1 --fuzz=0 < ../patches/opus-low-bitrate.patch
-          grep -q "use 1 to 256" src/opus.c
+          patch -p1 --fuzz=0 < ../patches/opus-bitrate-range.patch
+          grep -q "max_kbps" src/opus.c
 
       # src/win32-glob.c opremser filer med FindFirstFileA, altså ANSI-udgaven
       # af Windows-API'et, og får navnene tilbage i systemets ANSI-tegnsæt
@@ -307,6 +308,11 @@ jobs:
           ./src/soxi_ng.exe lav.opus
           "./src/$EXE" lav.opus lav-rundtur.wav
           ls -la lav-rundtur.wav
+          # Og over det gamle loft på 256. libopus klamper selv ved 300 per
+          # kanal, så filen bliver ikke 400 kbps — pointen er at den skrives.
+          "./src/$EXE" -V3 test.wav -C 400 -r 48000 hoej.opus
+          ls -la hoej.opus
+          ./src/soxi_ng.exe hoej.opus
           # Glob med danske tegn i navnet. Uden win32-glob-patchen får sox_ng
           # navnet tilbage fra Windows i CP1252, mens dens egen fopen venter
           # UTF-8, og det her fejler med "No such file or directory".
