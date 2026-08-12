@@ -1,0 +1,21 @@
+--- a/src/opus.c
++++ b/src/opus.c
+@@ -285,9 +285,15 @@
+     opus_int32 quality;
+     int retval;
+ 
+-    if (bitrate_kbps < 6 || bitrate_kbps > 256) {
+-      lsx_fail("invalid bitrate per channel of %gkbps; use 6 to 256",
+-               bitrate_kbps);
++    /* libopus takes any rate from 500bps up, dropping to SILK and then to
++     * narrowband as it falls, and opusenc has the same 500bps as its only
++     * hard limit -- the "6 to 750 kbit/s per channel" it prints is advice in
++     * an error message, not a check it makes. The trunc() above means 1kbps
++     * is the lowest rate that can be named here, and that clears libopus'
++     * floor with room to spare. Note that the rate is for the whole stream;
++     * it is not multiplied by the channel count anywhere. */
++    if (bitrate_kbps < 1 || bitrate_kbps > 256) {
++      lsx_fail("invalid bitrate of %gkbps; use 1 to 256", bitrate_kbps);
+       return SOX_EOF;
+     }
+     if (dquality == 0) quality = 10;

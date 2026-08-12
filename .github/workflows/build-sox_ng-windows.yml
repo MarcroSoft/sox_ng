@@ -126,6 +126,23 @@ jobs:
             "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
           echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
 
+      # opus.c afviser bitrates under 6 kbps, og det er sox_ng's egen husregel:
+      # libopus tager alt fra 500 bit/s og skifter selv til SILK og smalbånd,
+      # når raten falder, og opusenc har præcis samme 500 bit/s som eneste
+      # hårde grænse — dens "6 to 750 kbit/s per channel" står kun i en
+      # fejltekst. Patchen sætter gulvet til 1 kbps, som er det laveste, der
+      # kan udtrykkes, når trunc() har taget decimaldelen til complexity.
+      #
+      # Loftet på 256 kbps er urørt: opusenc går højere, men det er en anden
+      # diskussion end den her.
+      #
+      # Ligger efter backporten, så sha256'en tjekker den urørte fil.
+      - name: Tillad lave opus-bitrates (-C -1)
+        run: |
+          cd "$SRC"
+          patch -p1 --fuzz=0 < ../patches/opus-low-bitrate.patch
+          grep -q "use 1 to 256" src/opus.c
+
       # src/win32-glob.c opremser filer med FindFirstFileA, altså ANSI-udgaven
       # af Windows-API'et, og får navnene tilbage i systemets ANSI-tegnsæt
       # (CP1252 på en dansk maskine). Resten af sox_ng regner filnavne for
@@ -283,6 +300,13 @@ jobs:
           ./src/soxi_ng.exe test.opus
           "./src/$EXE" test.opus test-rundtur.wav
           ls -la test-rundtur.wav
+          # 1 kbps: under sox_ng's eget gamle gulv på 6, og dermed beviset på
+          # at bitrate-patchen kom med. -V3 viser hvad encoderen fik at vide.
+          "./src/$EXE" -V3 test.wav -C -1 -r 48000 lav.opus
+          ls -la lav.opus
+          ./src/soxi_ng.exe lav.opus
+          "./src/$EXE" lav.opus lav-rundtur.wav
+          ls -la lav-rundtur.wav
           # Glob med danske tegn i navnet. Uden win32-glob-patchen får sox_ng
           # navnet tilbage fra Windows i CP1252, mens dens egen fopen venter
           # UTF-8, og det her fejler med "No such file or directory".
