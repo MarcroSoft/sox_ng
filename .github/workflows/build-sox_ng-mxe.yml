@@ -105,10 +105,25 @@ jobs:
         id: mxecache
         uses: actions/cache/restore@v4
         with:
-          path: mxe/usr
+          path: |
+            mxe/usr
+            mxe/pkg
           key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-${{ hashFiles('.github/workflows/build-sox_ng-mxe.yml') }}
           restore-keys: |
             mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-
+
+      # Uden det her er cachen ren pynt. MXE's make sammenligner tidsstempler
+      # på src/*.mk med stemplerne i usr/installed, og git clone giver hver
+      # .mk-fil klonetidspunktet som mtime — altså nyere end alt, der kom ud
+      # af cachen. Så bygger make hele toolchainen om, hver gang. At røre
+      # stemplerne bagefter gør dem nyere end kilderne igen.
+      - name: Gør de gendannede stempler nyere end MXE's kilder
+        if: steps.mxecache.outputs.cache-matched-key != ''
+        run: |
+          if [ -d mxe/usr/installed ]; then
+            find mxe/usr -newermt '1970-01-01' -exec touch {} + 2>/dev/null || true
+            echo "rørte $(ls mxe/usr/installed | wc -l) pakkestempler"
+          fi
 
       # Det dyre trin. -j på tværs af pakker, JOBS inde i hver enkelt: MXE's
       # egen anbefaling, så de to niveauer ikke ganger op til en overtegnet
@@ -127,12 +142,18 @@ jobs:
 
       # Kun ved succes: en halvbygget toolchain i cachen ville give cache-hit
       # på næste kørsel og springe resten af buildet over.
+      # Nøglen skal være ordret den samme som i restore-trinnet. Stod der noget
+      # andet, ville gemningen ramme en nøgle, der allerede findes, og fejle
+      # med "unable to reserve cache" — hvad den gjorde, første gang jeg
+      # skrev det her.
       - name: Gem MXE-cache
         if: steps.deps.outcome == 'success' && steps.mxecache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: mxe/usr
-          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-v1
+          path: |
+            mxe/usr
+            mxe/pkg
+          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-${{ hashFiles('.github/workflows/build-sox_ng-mxe.yml') }}
 
       # Samme flag som MSYS2-buildet, med to forskelle: der er intet
       # -all-static at slås med, fordi MXE's .static-mål kun har statiske
