@@ -220,6 +220,7 @@ jobs:
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
             CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $(pkg-config --cflags opusfile)" \
+            CFLAGS="-O2 -ffunction-sections -fdata-sections" \
             LIBS="-lmpg123 -lshlwapi -lopusenc -lopus" \
             LDFLAGS="-static-libgcc" 2>&1 | tee configure.out
 
@@ -251,7 +252,11 @@ jobs:
       - name: Byg fuldt statisk
         run: |
           cd "$SRC"
-          make -j$(nproc) LDFLAGS="-all-static"
+          # --gc-sections skal stå her sammen med -all-static, ikke i
+          # configure: LDFLAGS ved make-tid erstatter det, configure gemte, så
+          # et flag der kun stod dér ville forsvinde ved den rigtige link.
+          # Sektionsopdelingen selv kommer fra -ffunction-sections ovenfor.
+          make -j$(nproc) LDFLAGS="-all-static -Wl,--gc-sections"
           # play_ng, rec_ng og soxi_ng laves af Makefilens "all:"-mål med
           # $(LN_S), der uden symlinks falder tilbage på cp. De er altså fulde
           # kopier, lavet før dette punkt, og skal strippes hver for sig —
