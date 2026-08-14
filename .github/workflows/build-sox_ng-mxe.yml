@@ -97,63 +97,33 @@ jobs:
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
       # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
-      # ellers ville en ændring i pakkelisten nedenfor give cache-hit på et
-      # træ uden den nye pakke, og buildet ville tavst fortsætte uden den.
-      # restore-keys henter det nærmeste ældre træ, så MXE kan bygge videre
-      # inkrementelt frem for forfra.
-      - name: Gendan MXE-cache
-        id: mxecache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            mxe/usr
-            mxe/pkg
-          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-${{ hashFiles('.github/workflows/build-sox_ng-mxe.yml') }}
-          restore-keys: |
-            mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-
-
-      # Uden det her er cachen ren pynt. MXE's make sammenligner tidsstempler
-      # på src/*.mk med stemplerne i usr/installed, og git clone giver hver
-      # .mk-fil klonetidspunktet som mtime — altså nyere end alt, der kom ud
-      # af cachen. Så bygger make hele toolchainen om, hver gang. At røre
-      # stemplerne bagefter gør dem nyere end kilderne igen.
-      - name: Gør de gendannede stempler nyere end MXE's kilder
-        if: steps.mxecache.outputs.cache-matched-key != ''
-        run: |
-          if [ -d mxe/usr/installed ]; then
-            find mxe/usr -newermt '1970-01-01' -exec touch {} + 2>/dev/null || true
-            echo "rørte $(ls mxe/usr/installed | wc -l) pakkestempler"
-          fi
+      # Her sad der en cache af mxe/usr. Den er fjernet igen, og det er værd
+      # at vide hvorfor, hvis nogen får den samme gode idé:
+      #
+      #   kørsel 1  23,8 min  koldt
+      #   kørsel 2  36,6 min  cache gendannet, alt bygget om alligevel
+      #   kørsel 3  32,2 min  koldt igen, gemte 398 MiB
+      #   kørsel 4  fejlede   cache gendannet, sdl's CMake fandt ingen gcc
+      #
+      # MXE's make sammenligner tidsstempler på src/*.mk med stemplerne i
+      # usr/$(TARGET)/installed, og git clone giver hver .mk-fil klonetids-
+      # punktet som mtime. Alt fra en cache er altså per definition ældre end
+      # kilderne, og hele toolchainen bygges om uanset. At røre stemplerne
+      # bagefter kan lappe dét, men kørsel 4 viste, at et halvt gendannet
+      # MXE-træ også kan vælte pakker, der byggede fint fra bunden.
+      #
+      # 25-35 minutter der virker, slår en cache der ikke gør.
 
       # Det dyre trin. -j på tværs af pakker, JOBS inde i hver enkelt: MXE's
       # egen anbefaling, så de to niveauer ikke ganger op til en overtegnet
       # maskine. Runneren har fire kerner.
-      # Kører altid, også med varm cache: MXE bygger inkrementelt, så et
-      # fuldt træ koster et par sekunder at bekræfte, mens en tilføjet pakke
-      # bliver bygget. Det er billigere end at gætte på, om cachen er komplet.
       - name: Byg krydstoolchain og codecs
-        id: deps
         run: |
           cd mxe
           make check-requirements MXE_TARGETS="$MXE_TARGET"
           make MXE_TARGETS="$MXE_TARGET" -j$(nproc) JOBS=2 \
             flac lame libmad twolame vorbis opusfile libopusenc wavpack \
             opencore-amr libpng file libltdl mpg123 libid3tag
-
-      # Kun ved succes: en halvbygget toolchain i cachen ville give cache-hit
-      # på næste kørsel og springe resten af buildet over.
-      # Nøglen skal være ordret den samme som i restore-trinnet. Stod der noget
-      # andet, ville gemningen ramme en nøgle, der allerede findes, og fejle
-      # med "unable to reserve cache" — hvad den gjorde, første gang jeg
-      # skrev det her.
-      - name: Gem MXE-cache
-        if: steps.deps.outcome == 'success' && steps.mxecache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            mxe/usr
-            mxe/pkg
-          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-${{ hashFiles('.github/workflows/build-sox_ng-mxe.yml') }}
 
       # Samme flag som MSYS2-buildet, med to forskelle: der er intet
       # -all-static at slås med, fordi MXE's .static-mål kun har statiske
