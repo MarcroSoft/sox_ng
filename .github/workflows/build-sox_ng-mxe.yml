@@ -142,6 +142,8 @@ jobs:
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="$MXE_TARGET-pkg-config" \
             CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
+            CFLAGS="-O2 -ffunction-sections -fdata-sections" \
+            LDFLAGS="-Wl,--gc-sections" \
             LIBS="-lopusenc -lopus -lmpg123 -lshlwapi" 2>&1 | tee configure.out
 
       - name: Kontrollér at alle formater kom med
@@ -162,13 +164,22 @@ jobs:
             exit 1
           fi
 
+      # -R .comment fjerner de 865 kopier af "GCC: (GNU) 11.5.0" — én per
+      # oversættelsesenhed. Almindelig strip lader dem stå, fordi .comment
+      # hverken indlæses eller refereres; det er også derfor --gc-sections
+      # ikke rører dem. To forskellige problemer, to forskellige flag.
       - name: Byg
         run: |
           export PATH="$PWD/mxe/usr/bin:$PATH"
           cd "$SRC"
           make -j$(nproc)
-          "$MXE_TARGET-strip" src/*.exe
+          cp src/sox_ng.exe /tmp/ustrippet.exe
+          "$MXE_TARGET-strip" -R .comment -R .note src/*.exe
           ls -la src/*.exe
+          echo "=== hvad de tre trin hver især gav ==="
+          printf "ustrippet:        %s\n" "$(stat -c%s /tmp/ustrippet.exe)"
+          printf "strippet:         %s\n" "$(stat -c%s src/sox_ng.exe)"
+          printf "GCC-strenge nu:   %s\n" "$(strings -a src/sox_ng.exe | grep -c 'GCC: (GNU)' || true)"
 
       - name: Vis configure-log hvis noget gik galt
         if: failure()
