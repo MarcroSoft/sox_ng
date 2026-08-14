@@ -256,8 +256,12 @@ jobs:
           # $(LN_S), der uden symlinks falder tilbage på cp. De er altså fulde
           # kopier, lavet før dette punkt, og skal strippes hver for sig —
           # ellers ryger tre ustrippede kopier på 12 MB med i zip'en.
-          strip src/*.exe
+          # -R .comment: almindelig strip lader den sektion stå, og der ligger
+          # én kopi af gcc's versionsstreng per oversættelsesenhed. Det fylder
+          # ikke noget at tale om, men det støjer i `strings`.
+          strip -R .comment -R .note src/*.exe
           ls -la src/*.exe
+          echo "GCC-strenge tilbage: $(strings src/sox_ng.exe | grep -c 'GCC: (GNU)' || true)"
           if [ "${{ github.event.inputs.replace }}" = "true" ]; then
             mv src/sox_ng.exe src/sox.exe
             echo "EXE=sox.exe" >> $GITHUB_ENV
