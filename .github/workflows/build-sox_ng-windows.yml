@@ -50,7 +50,6 @@ jobs:
             mingw-w64-x86_64-twolame
             mingw-w64-x86_64-libid3tag
             mingw-w64-x86_64-libpng
-            mingw-w64-x86_64-fftw
             mingw-w64-x86_64-opencore-amr
             mingw-w64-x86_64-gsm
 
@@ -245,6 +244,17 @@ jobs:
             echo "Disse kom ikke med:$mangler"
             exit 1
           fi
+          # FFTW er fravalgt med vilje: den fylder omkring 4 MB og gjorde kun
+          # spektrogrammet hurtigere — `rate` og `sinc` var lige hurtige med og
+          # uden, målt mod MXE-buildet, der aldrig har haft den. Kommer den
+          # snigende ind igen som afhængighed af en anden pakke, linker
+          # configure den uden at sige noget, og filen vokser tilbage.
+          if ! grep -qE "^FFTW support\.+no" configure.out; then
+            echo "FFTW er tilbage i buildet:"
+            grep -E "^FFTW support" configure.out
+            exit 1
+          fi
+          echo "ok:      FFTW er ude, som tilsigtet"
 
       # Det vigtige trick: libtool sluger et almindeligt "-static" og linker
       # alligevel libgomp/libwinpthread dynamisk. libtools eget "-all-static"
