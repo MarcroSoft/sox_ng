@@ -117,7 +117,20 @@ jobs:
       # Det dyre trin. -j på tværs af pakker, JOBS inde i hver enkelt: MXE's
       # egen anbefaling, så de to niveauer ikke ganger op til en overtegnet
       # maskine. Runneren har fire kerner.
+      # -Os på hele træet. MXE har ingen indbygget hage til det — ordet -Os
+      # optræder ikke ét sted i deres Makefile — men hver pakkes configure
+      # respekterer CFLAGS fra miljøet, og env: her gælder hele trinnet, så
+      # det arves ned i alle byggerier.
+      #
+      # To forbehold, som kørslen må afgøre: det rammer også selve gcc-
+      # bootstrappet, hvor det hverken er tilsigtet eller nyttigt, og
+      # CMake-baserede pakker som sdl læser ikke nødvendigvis CFLAGS.
+      # Skal det væk igen, er det de to linjer under env: og -Os i
+      # Configure-trinnet nedenfor.
       - name: Byg krydstoolchain og codecs
+        env:
+          CFLAGS: -Os
+          CXXFLAGS: -Os
         run: |
           cd mxe
           make check-requirements MXE_TARGETS="$MXE_TARGET"
@@ -142,7 +155,7 @@ jobs:
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="$MXE_TARGET-pkg-config" \
             CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
-            CFLAGS="-O2 -ffunction-sections -fdata-sections" \
+            CFLAGS="-Os -ffunction-sections -fdata-sections" \
             LDFLAGS="-Wl,--gc-sections" \
             LIBS="-lopusenc -lopus -lmpg123 -lshlwapi" 2>&1 | tee configure.out
 
