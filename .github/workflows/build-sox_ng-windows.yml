@@ -220,7 +220,7 @@ jobs:
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
             CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $(pkg-config --cflags opusfile)" \
-            CFLAGS="-O2 -ffunction-sections -fdata-sections" \
+            CFLAGS="-Os -ffunction-sections -fdata-sections" \
             LIBS="-lmpg123 -lshlwapi -lopusenc -lopus" \
             LDFLAGS="-static-libgcc" 2>&1 | tee configure.out
 
