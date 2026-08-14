@@ -96,30 +96,39 @@ jobs:
           patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
+      # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
+      # ellers ville en ændring i pakkelisten nedenfor give cache-hit på et
+      # træ uden den nye pakke, og buildet ville tavst fortsætte uden den.
+      # restore-keys henter det nærmeste ældre træ, så MXE kan bygge videre
+      # inkrementelt frem for forfra.
       - name: Gendan MXE-cache
         id: mxecache
         uses: actions/cache/restore@v4
         with:
           path: mxe/usr
-          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-v1
+          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-${{ hashFiles('.github/workflows/build-sox_ng-mxe.yml') }}
+          restore-keys: |
+            mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-
 
       # Det dyre trin. -j på tværs af pakker, JOBS inde i hver enkelt: MXE's
       # egen anbefaling, så de to niveauer ikke ganger op til en overtegnet
       # maskine. Runneren har fire kerner.
+      # Kører altid, også med varm cache: MXE bygger inkrementelt, så et
+      # fuldt træ koster et par sekunder at bekræfte, mens en tilføjet pakke
+      # bliver bygget. Det er billigere end at gætte på, om cachen er komplet.
       - name: Byg krydstoolchain og codecs
         id: deps
-        if: steps.mxecache.outputs.cache-hit != 'true'
         run: |
           cd mxe
           make check-requirements MXE_TARGETS="$MXE_TARGET"
           make MXE_TARGETS="$MXE_TARGET" -j$(nproc) JOBS=2 \
             flac lame libmad twolame vorbis opusfile libopusenc wavpack \
-            opencore-amr libpng file libltdl mpg123
+            opencore-amr libpng file libltdl mpg123 libid3tag
 
       # Kun ved succes: en halvbygget toolchain i cachen ville give cache-hit
       # på næste kørsel og springe resten af buildet over.
       - name: Gem MXE-cache
-        if: steps.deps.outcome == 'success'
+        if: steps.deps.outcome == 'success' && steps.mxecache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: mxe/usr
@@ -148,7 +157,7 @@ jobs:
         run: |
           cd "$SRC"
           mangler=""
-          for f in flac lpc10 "mp1/mp2/mp3" lame mad twolame \
+          for f in flac lpc10 "mp1/mp2/mp3" id3tag lame mad twolame \
                    oggvorbis opus wavpack amrnb amrwb waveaudio; do
             linje=$(grep -E "^ ?$f[ .]" configure.out | head -1 || true)
             case "$linje" in
