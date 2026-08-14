@@ -1,0 +1,191 @@
+name: sox_ng krydsbygget med MXE
+
+# MXE (M cross environment) bygger krydstoolchainen og hvert eneste bibliotek
+# fra kilde på Linux. Det er den vej sox_ng's egen vedligeholder laver sine
+# Windows-exe'er. Prisen er timer, hvor MSYS2-buildet tager minutter; til
+# gengæld er hele træet pinnet og reproducerbart, og pakkerne er nye — MXE's
+# færdigbyggede apt-pakker er sidst rørt i januar 2021 og kan ikke bruges.
+#
+# Første kørsel bygger alt. Bagefter ligger mxe/usr i cachen, og senere
+# kørsler tager minutter, så længe MXE_COMMIT står stille.
+#
+# Rækkefølgen er med vilje: alt der kan fejle hurtigt — apt, patches, MXE's
+# egen kravkontrol — ligger før det lange build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "sox_ng-version fra Codeberg-releases"
+        default: "14.8.0.1"
+
+env:
+  MXE_COMMIT: f4f0045ac69c869ec2012a8faeca74d42ff03d82
+  MXE_TARGET: x86_64-w64-mingw32.static
+
+jobs:
+  mxe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # jobgrænsen hos GitHub er 360
+
+    steps:
+      - name: Hent dette repo (patches/)
+        uses: actions/checkout@v4
+
+      # Listen er MXE's egen for "Debian and derivatives", taget fra deres
+      # docs. libclang-dev er udeladt: den fylder omkring en gigabyte og
+      # bruges kun af pakker, vi ikke bygger. Mangler der noget, siger
+      # check-requirements nedenfor det, længe før det koster tid.
+      - name: Forudsætninger
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake autopoint bash bison bzip2 flex g++ g++-multilib \
+            gettext git gperf intltool libc6-dev-i386 libgdk-pixbuf2.0-dev \
+            libltdl-dev libgl-dev libpcre2-dev libssl-dev libtool-bin \
+            libxml-parser-perl lzip make openssl p7zip-full patch perl python3 \
+            python3-mako python3-packaging python3-setuptools python-is-python3 \
+            ruby sed sqlite3 unzip wget xz-utils
+
+      - name: Hent MXE (pinnet commit)
+        run: |
+          git clone https://github.com/mxe/mxe.git
+          git -C mxe checkout "$MXE_COMMIT"
+          git -C mxe log -1 --format="MXE på %h fra %ci"
+
+      # libopusenc findes ikke som MXE-pakke. Uden den kan sox_ng ikke skrive
+      # .opus, og så ville buildet ikke kunne sammenlignes med MSYS2-udgaven.
+      # Version og checksum er de samme, som MSYS2 bruger, og jeg har hentet
+      # tarballen og regnet efter.
+      - name: Tilføj libopusenc som MXE-pakke
+        run: |
+          cat > mxe/src/libopusenc.mk <<'MKEOF'
+          # This file is part of MXE. See LICENSE.md for licensing information.
+
+          PKG             := libopusenc
+          $(PKG)_WEBSITE  := https://opus-codec.org/
+          $(PKG)_DESCR    := High-level API for encoding .opus files
+          $(PKG)_IGNORE   :=
+          $(PKG)_VERSION  := 0.3
+          $(PKG)_CHECKSUM := f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c
+          $(PKG)_SUBDIR   := $(PKG)-$($(PKG)_VERSION)
+          $(PKG)_FILE     := $(PKG)-$($(PKG)_VERSION).tar.gz
+          $(PKG)_URL      := https://downloads.xiph.org/releases/opus/$($(PKG)_FILE)
+          $(PKG)_DEPS     := cc opus
+
+          define $(PKG)_BUILD
+              cd '$(1)' && ./configure $(MXE_CONFIGURE_OPTS)
+              $(MAKE) -C '$(1)' -j '$(JOBS)' install
+          endef
+          MKEOF
+          cat mxe/src/libopusenc.mk
+
+      # Ligger før det lange build med vilje: fejler en patch, koster det et
+      # minut at opdage i stedet for to timer.
+      - name: Hent og lap sox_ng
+        run: |
+          V="${{ github.event.inputs.version }}"
+          wget -q "https://codeberg.org/sox_ng/sox_ng/releases/download/sox_ng-$V/sox_ng-$V.tar.gz"
+          tar xzf "sox_ng-$V.tar.gz"
+          cd "sox_ng-$V"
+          OPUS_C=5caa22dfc66fea186594cf20c96db2b1362ec00a
+          wget -q -O src/opus.c \
+            "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
+          echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
+          patch -p1 --fuzz=0 < ../patches/opus-bitrate-range.patch
+          patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
+          echo "SRC=sox_ng-$V" >> $GITHUB_ENV
+
+      - name: Gendan MXE-cache
+        id: mxecache
+        uses: actions/cache/restore@v4
+        with:
+          path: mxe/usr
+          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-v1
+
+      # Det dyre trin. -j på tværs af pakker, JOBS inde i hver enkelt: MXE's
+      # egen anbefaling, så de to niveauer ikke ganger op til en overtegnet
+      # maskine. Runneren har fire kerner.
+      - name: Byg krydstoolchain og codecs
+        id: deps
+        if: steps.mxecache.outputs.cache-hit != 'true'
+        run: |
+          cd mxe
+          make check-requirements MXE_TARGETS="$MXE_TARGET"
+          make MXE_TARGETS="$MXE_TARGET" -j$(nproc) JOBS=2 \
+            flac lame libmad twolame vorbis opusfile libopusenc wavpack \
+            opencore-amr libpng file libltdl mpg123
+
+      # Kun ved succes: en halvbygget toolchain i cachen ville give cache-hit
+      # på næste kørsel og springe resten af buildet over.
+      - name: Gem MXE-cache
+        if: steps.deps.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: mxe/usr
+          key: mxe-${{ env.MXE_COMMIT }}-${{ env.MXE_TARGET }}-v1
+
+      # Samme flag som MSYS2-buildet, med to forskelle: der er intet
+      # -all-static at slås med, fordi MXE's .static-mål kun har statiske
+      # biblioteker at linke imod, og MXE's lame er 4.0 ligesom vores, så
+      # mpg123 skal med i LIBS af samme grund som dér.
+      - name: Configure
+        run: |
+          set -o pipefail
+          export PATH="$PWD/mxe/usr/bin:$PATH"
+          cd "$SRC"
+          ./configure --host="$MXE_TARGET" \
+            --disable-shared --enable-static \
+            --without-ao --without-pulseaudio --without-alsa --without-oss --without-sndio \
+            --without-sndfile \
+            --with-waveaudio \
+            --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
+            PKG_CONFIG="$MXE_TARGET-pkg-config" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
+            LIBS="-lopusenc -lopus -lmpg123 -lshlwapi" 2>&1 | tee configure.out
+
+      - name: Kontrollér at alle formater kom med
+        run: |
+          cd "$SRC"
+          mangler=""
+          for f in flac lpc10 "mp1/mp2/mp3" lame mad twolame \
+                   oggvorbis opus wavpack amrnb amrwb waveaudio; do
+            linje=$(grep -E "^ ?$f[ .]" configure.out | head -1 || true)
+            case "$linje" in
+              *yes*) echo "ok:      $linje" ;;
+              *)     echo "MANGLER: $f  [${linje:-ingen linje i opsummeringen}]"
+                     mangler="$mangler $f" ;;
+            esac
+          done
+          if [ -n "$mangler" ]; then
+            echo "Disse kom ikke med:$mangler"
+            exit 1
+          fi
+
+      - name: Byg
+        run: |
+          export PATH="$PWD/mxe/usr/bin:$PATH"
+          cd "$SRC"
+          make -j$(nproc)
+          "$MXE_TARGET-strip" src/*.exe
+          ls -la src/*.exe
+
+      - name: Vis configure-log hvis noget gik galt
+        if: failure()
+        run: tail -n 60 "$SRC/config.log" || true
+
+      - name: Hvad blev det til
+        run: |
+          export PATH="$PWD/mxe/usr/bin:$PATH"
+          cd "$SRC"
+          file src/sox_ng.exe
+          echo "=== DLL'er exe'en stadig hænger på ==="
+          "$MXE_TARGET-objdump" -p src/sox_ng.exe | grep -i "DLL Name" | sort -u
+
+      - name: Upload færdig exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: sox_ng-win64-mxe
+          path: |
+            ${{ env.SRC }}/src/*.exe
+            ${{ env.SRC }}/configure.out
