@@ -73,9 +73,21 @@ jobs:
           $(PKG)_URL      := https://downloads.xiph.org/releases/opus/$($(PKG)_FILE)
           $(PKG)_DEPS     := cc opus
 
+          define $(PKG)_UPDATE
+              $(WGET) -q -O- 'https://downloads.xiph.org/releases/opus/' | \
+              $(SED) -n 's,.*libopusenc-\([0-9][^>]*\)\.tar\.gz.*,\1,p' | \
+              grep -v 'alpha' | \
+              grep -v 'beta' | \
+              $(SORT) -Vr | \
+              head -1
+          endef
+
           define $(PKG)_BUILD
-              cd '$(1)' && ./configure $(MXE_CONFIGURE_OPTS)
-              $(MAKE) -C '$(1)' -j '$(JOBS)' install
+              cd '$(1)' && ./configure \
+                  $(MXE_CONFIGURE_OPTS) \
+                  --disable-doc
+              $(MAKE) -C '$(1)' -j '$(JOBS)'
+              $(MAKE) -C '$(1)' -j 1 install
           endef
           MKEOF
           cat mxe/src/libopusenc.mk
