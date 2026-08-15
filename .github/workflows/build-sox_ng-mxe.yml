@@ -20,7 +20,7 @@ on:
         default: "14.8.0.1"
 
 env:
-  MXE_COMMIT: f4f0045ac69c869ec2012a8faeca74d42ff03d82
+  MXE_COMMIT: 81ac034695207f597deec8947725c9bfc1ab4001
   MXE_TARGET: x86_64-w64-mingw32.static
 
 jobs:
