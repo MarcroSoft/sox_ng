@@ -185,6 +185,26 @@ jobs:
           patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
           grep -q FindFirstFileW src/win32-glob.c
 
+      # lsx_popen() bygger en kommandolinje til cmd.exe, men cmd er ikke den
+      # eneste, der deler den op: bagefter parser barnets eget C-runtime
+      # resten til argv og deler igen på mellemrum, der ikke står i citater.
+      #
+      # 14.8.0.1 escaper med backslash og siger selv i kommentaren "I dunno
+      # about Windows". Målt med et program, der udskriver sin argv:
+      #
+      #   backslash:      argv[2]=[med\]                argv[3]=[mellemrum.m4a]
+      #   caret (main):   argv[2]=[med]                 argv[3]=[mellemrum.m4a]
+      #   anførselstegn:  argv[2]=[med mellemrum.m4a]
+      #
+      # ffmpeg får altså to argumenter for én fil, åbner ingen af dem og
+      # skriver intet — hvad sox_ng ser som "premature EOF". Det rammer m4a,
+      # som kun kan læses gennem ffmpeg-pipen.
+      - name: Sæt anførselstegn om filnavnet til ffmpeg (util.c)
+        run: |
+          cd "$SRC"
+          patch -p1 --fuzz=0 < ../patches/ffmpeg-quote-filename.patch
+          grep -q "cannot contain" src/util.c
+
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
       # ld scanner arkiverne fra venstre mod højre, og når libopusfile.a først er

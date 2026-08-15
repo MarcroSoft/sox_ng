@@ -1,0 +1,50 @@
+--- a/src/util.c
++++ b/src/util.c
+@@ -467,7 +467,38 @@
+ #elif HAVE_POPEN
+ 
+   /* Quote special characters in the filename. */
+-  /* This is for the Unix shell. I dunno about Windows. */
++#ifdef _WIN32
++  /* popen() hands the command to cmd.exe, but cmd is not the only thing that
++   * takes it apart: once cmd is done, the child's own C runtime parses what
++   * is left into argv and splits on unquoted whitespace all over again.
++   *
++   * The Unix branch below satisfies neither of them here. cmd leaves its
++   * backslashes alone and the child then splits on the bare space, so ffmpeg
++   * reading `med mellemrum.m4a' is handed `med\' and `mellemrum.m4a' as two
++   * arguments, opens neither, and writes nothing -- which reaches SoX as
++   * "premature EOF" rather than as an error. Escaping with ^ instead does not
++   * help: cmd consumes the caret and the child still sees a bare space.
++   *
++   * Double quotes are understood by both, so quote the whole name. Windows
++   * filenames cannot contain " < > | ? * so there is nothing inside that
++   * needs escaping, with one exception: a run of backslashes just before the
++   * closing quote would escape it, so those are doubled.
++   *
++   * Not fixed here: cmd expands %VAR% inside double quotes too, and a percent
++   * sign cannot be escaped on a command line, only in a batch file, so a
++   * filename containing one will still fail.
++   */
++  quoted_filename = lsx_malloc(strlen(filename) * 2 + 3);
++  q = quoted_filename;
++  *q++ = '"';
++  for (p = filename; *p; p++)
++    *q++ = *p;
++  for (p = filename + strlen(filename); p > filename && p[-1] == '\\'; p--)
++    *q++ = '\\';
++  *q++ = '"';
++  *q = '\0';
++#else
++  /* This is for the Unix shell. */
+   quoted_filename = lsx_malloc(strlen(filename) * 2 + 1);
+   for (p=filename, q=quoted_filename; *p; p++, q++) {
+     switch (*p) {
+@@ -482,6 +513,7 @@
+     *q = *p;
+   }
+   *q = '\0';
++#endif
+ 
+   argv[filename_index] = quoted_filename;
+ 
