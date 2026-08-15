@@ -128,7 +128,7 @@ jobs:
           make check-requirements MXE_TARGETS="$MXE_TARGET"
           make MXE_TARGETS="$MXE_TARGET" -j$(nproc) JOBS=2 \
             flac lame libmad twolame vorbis opusfile libopusenc wavpack \
-            opencore-amr libpng file libltdl mpg123 libid3tag
+            opencore-amr libpng file libltdl mpg123 libid3tag speexdsp
 
       # Samme flag som MSYS2-buildet, med to forskelle: der er intet
       # -all-static at slås med, fordi MXE's .static-mål kun har statiske
@@ -168,6 +168,13 @@ jobs:
             echo "Disse kom ikke med:$mangler"
             exit 1
           fi
+          # speexdsp giver effekten af samme navn: -agc, -denoise og -dereverb.
+          if ! grep -qE "^speexdsp support\.+yes" configure.out; then
+            echo "speexdsp kom ikke med:"
+            grep -E "^speexdsp support" configure.out
+            exit 1
+          fi
+          echo "ok:      speexdsp er med"
 
       # -R .comment fjerner de 865 kopier af "GCC: (GNU) 11.5.0" — én per
       # oversættelsesenhed. Almindelig strip lader dem stå, fordi .comment

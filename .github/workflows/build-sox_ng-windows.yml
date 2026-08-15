@@ -50,6 +50,7 @@ jobs:
             mingw-w64-x86_64-twolame
             mingw-w64-x86_64-libid3tag
             mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-speexdsp
             mingw-w64-x86_64-opencore-amr
 
       # gsm-pakken er med vilje IKKE på listen, og den må ikke sættes tilbage.
@@ -291,6 +292,14 @@ jobs:
           # uden, målt mod MXE-buildet, der aldrig har haft den. Kommer den
           # snigende ind igen som afhængighed af en anden pakke, linker
           # configure den uden at sige noget, og filen vokser tilbage.
+          # speexdsp giver effekten af samme navn: -agc, -denoise og -dereverb.
+          # Den er et bibliotek som alle de andre og kan udgå lige så tavst.
+          if ! grep -qE "^speexdsp support\.+yes" configure.out; then
+            echo "speexdsp kom ikke med:"
+            grep -E "^speexdsp support" configure.out
+            exit 1
+          fi
+          echo "ok:      speexdsp er med"
           if ! grep -qE "^FFTW support\.+no" configure.out; then
             echo "FFTW er tilbage i buildet:"
             grep -E "^FFTW support" configure.out
