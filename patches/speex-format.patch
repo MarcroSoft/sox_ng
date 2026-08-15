@@ -1,0 +1,815 @@
+--- a/src/formats.h	2026-05-25 19:40:54.000000000 +0200
++++ b/src/formats.h	2026-08-15 12:05:21.223386600 +0200
+@@ -128,6 +128,11 @@
+ #if defined HAVE_SNDIO && (defined STATIC_SNDIO || !defined HAVE_LIBLTDL)
+   FORMAT(sndio)
+ #endif
++#if HAVE_SPEEX
++  /* Before the ffmpeg block below, which also answers to `spx', so that the
++   * native handler is the one found when looking the extension up. */
++  FORMAT(speex)
++#endif
+ #if defined HAVE_SUN_AUDIO && (defined STATIC_SUN_AUDIO || !defined HAVE_LIBLTDL)
+   FORMAT(sunau)
+ #endif
+--- a/src/formats.c	2026-05-25 19:40:54.000000000 +0200
++++ b/src/formats.c	2026-08-15 12:05:17.802638400 +0200
+@@ -304,6 +304,7 @@
+   {sox_encodings_lossy2, "LPC10"        , "LPC10"},
+   {sox_encodings_lossy2, "Opus"         , "Opus"},
+   {sox_encodings_none  , "DSD"          , "Direct Stream Digital"},
++  {sox_encodings_lossy2, "Speex"        , "Speex"},
+ };
+ 
+ assert_static(array_length(s_sox_encodings_info) == SOX_ENCODINGS,
+@@ -354,6 +355,7 @@
+     case SOX_ENCODING_GSM:
+     case SOX_ENCODING_VORBIS:
+     case SOX_ENCODING_OPUS:
++    case SOX_ENCODING_SPEEX:
+     case SOX_ENCODING_AMR_WB:
+     case SOX_ENCODING_AMR_NB:
+     case SOX_ENCODING_LPC10:      return !bits_per_sample? 16: 0;
+--- a/src/sox_ng.h	2026-05-25 19:40:54.000000000 +0200
++++ b/src/sox_ng.h	2026-08-15 12:05:12.863558300 +0200
+@@ -549,6 +549,7 @@
+   SOX_ENCODING_LPC10     , /**< Linear Predictive Coding */
+   SOX_ENCODING_OPUS      , /**< Opus compression */
+   SOX_ENCODING_DSD       , /**< Direct Stream Digital */
++  SOX_ENCODING_SPEEX     , /**< Speex compression */
+ 
+   SOX_ENCODINGS            /**< End of list marker */
+ } sox_encoding_t;
+--- a/src/Makefile.in	2026-05-26 17:35:47.000000000 +0200
++++ b/src/Makefile.in	2026-08-15 12:05:34.598128700 +0200
+@@ -376,7 +376,8 @@
+ 	libsox_ng_la-reverse.lo libsox_ng_la-saturation.lo \
+ 	libsox_ng_la-silence.lo libsox_ng_la-sinc.lo \
+ 	libsox_ng_la-sdm.lo libsox_ng_la-softvol.lo \
+-	libsox_ng_la-speed.lo libsox_ng_la-speexdsp.lo \
++	libsox_ng_la-speed.lo libsox_ng_la-speex.lo \
++	libsox_ng_la-speexdsp.lo \
+ 	libsox_ng_la-splice.lo libsox_ng_la-stat.lo \
+ 	libsox_ng_la-stats.lo libsox_ng_la-stretch.lo \
+ 	libsox_ng_la-swap.lo libsox_ng_la-synth.lo \
+@@ -2268,6 +2269,9 @@
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libsox_ng_la_CFLAGS) $(CFLAGS) -c -o libsox_ng_la-speed.lo `test -f 'speed.c' || echo '$(srcdir)/'`speed.c
+ 
++libsox_ng_la-speex.lo: speex.c
++	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libsox_ng_la_CFLAGS) $(CFLAGS) -c -o libsox_ng_la-speex.lo `test -f 'speex.c' || echo '$(srcdir)/'`speex.c
++
+ libsox_ng_la-speexdsp.lo: speexdsp.c
+ @am__fastdepCC_TRUE@	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libsox_ng_la_CFLAGS) $(CFLAGS) -MT libsox_ng_la-speexdsp.lo -MD -MP -MF $(DEPDIR)/libsox_ng_la-speexdsp.Tpo -c -o libsox_ng_la-speexdsp.lo `test -f 'speexdsp.c' || echo '$(srcdir)/'`speexdsp.c
+ @am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libsox_ng_la-speexdsp.Tpo $(DEPDIR)/libsox_ng_la-speexdsp.Plo
+--- /dev/null
++++ b/src/speex.c
+@@ -0,0 +1,748 @@
++/* libSoX Ogg Speex sound format handler
++ *
++ * Copyright 2026 SoX contributors
++ *
++ * The container handling follows vorbis.c; the codec calls follow speexenc.c
++ * and speexdec.c from the speex distribution, (c) 2002-2006 Jean-Marc Valin,
++ * in particular the granule-position arithmetic that trims the encoder's
++ * lookahead off the front and the zero padding off the back.
++ *
++ * This library is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or (at
++ * your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this library; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++#include "sox_i.h"
++
++#if HAVE_SPEEX
++
++#include <ogg/ogg.h>
++#include <speex/speex.h>
++#include <speex/speex_callbacks.h>
++#include <speex/speex_header.h>
++#include <speex/speex_stereo.h>
++#include <string.h>
++
++#define READ_SIZE       4096 /* Bytes handed to libogg at a time */
++#define MAX_FRAME_BYTES 2000 /* Ceiling speexenc uses for one packet */
++#define DEFAULT_QUALITY 8    /* speexenc's default as well */
++
++typedef struct {
++  /* Ogg container */
++  ogg_sync_state   oy;
++  ogg_stream_state os;
++  int              stream_init;
++
++  /* Speex codec */
++  void           * st;            /* Encoder or decoder state */
++  SpeexBits        bits;
++  SpeexStereoState stereo;
++  int              channels;
++  int              frame_size;    /* Samples per channel per frame */
++  int              nframes;       /* Frames per Ogg packet */
++  spx_int32_t      lookahead;
++
++  /* Reading */
++  spx_int16_t    * frame;         /* Decoded frame, interleaved */
++  size_t           frame_pos;     /* Next sample to hand out */
++  size_t           frame_len;     /* Samples in frame that are ours to keep */
++  int              frame_index;   /* Frame number within the current packet */
++  int              frames_left;   /* Frames still coded in the current packet */
++  int              packet_no;     /* Packet number within the current page */
++  int              page_packets;
++  int              skip_samples;
++  ogg_int64_t      last_granule;
++  int              eos;
++
++  /* Writing */
++  unsigned char  * cbits;         /* Packet under construction */
++  spx_int16_t    * inbuf;         /* Partial frame waiting to be encoded */
++  size_t           inbuf_len;     /* Interleaved samples sitting in inbuf */
++  ogg_int64_t      total_in;      /* Interleaved samples handed to us */
++  ogg_int64_t      total_samples; /* The same, per channel */
++  ogg_int64_t      nb_encoded;    /* Samples per channel the encoder has out */
++  ogg_int64_t      frames_written;
++} priv_t;
++
++/*-------------------------------- Reading ---------------------------------*/
++
++/* Pull bytes until libogg hands back a complete page.  Returns 0 at EOF. */
++static int read_page(sox_format_t * ft, ogg_page * og)
++{
++  priv_t * p = (priv_t *)ft->priv;
++
++  while (ogg_sync_pageout(&p->oy, og) != 1) {
++    char * data = ogg_sync_buffer(&p->oy, (long)READ_SIZE);
++    size_t got;
++
++    if (!data)
++      return 0;
++    got = lsx_readbuf(ft, data, (size_t)READ_SIZE);
++    if (!got)
++      return 0;
++    ogg_sync_wrote(&p->oy, (long)got);
++  }
++  return 1;
++}
++
++/* Feed one page to the stream layer and work out, from its granule position,
++ * how many samples of the packets ending on it are padding.  A positive
++ * skip_samples means padding at the front, negative means at the back. */
++static void page_in(sox_format_t * ft, ogg_page * og)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_int64_t granule;
++
++  ogg_stream_pagein(&p->os, og);
++  granule = ogg_page_granulepos(og);
++  p->page_packets = ogg_page_packets(og);
++  p->packet_no = 0;
++
++  if (granule > 0 && p->frame_size) {
++    p->skip_samples = (int)((ogg_int64_t)p->frame_size *
++        ((ogg_int64_t)p->page_packets * p->nframes) -
++        (granule - p->last_granule));
++    if (ogg_page_eos(og))
++      p->skip_samples = -p->skip_samples;
++  } else
++    p->skip_samples = 0;
++
++  p->last_granule = granule;
++}
++
++/* Next packet of the Speex stream, headers included.  Returns 0 at the end. */
++static int next_packet(sox_format_t * ft, ogg_packet * op)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_page og;
++
++  while (!p->eos) {
++    if (p->stream_init) {
++      int r = ogg_stream_packetout(&p->os, op);
++
++      if (r == 1) {
++        ++p->packet_no;
++        if (op->e_o_s)
++          p->eos = 1;
++        return 1;
++      }
++      if (r < 0)
++        lsx_warn("hole in stream; probably harmless");
++    }
++    if (!read_page(ft, &og))
++      return 0;
++    if (!p->stream_init) {
++      ogg_stream_init(&p->os, ogg_page_serialno(&og));
++      p->stream_init = 1;
++    } else if (ogg_page_serialno(&og) != p->os.serialno)
++      ogg_stream_reset_serialno(&p->os, ogg_page_serialno(&og));
++    page_in(ft, &og);
++  }
++  return 0;
++}
++
++static sox_uint32_t get32(unsigned char const * p)
++{
++  return (sox_uint32_t)p[0] | ((sox_uint32_t)p[1] << 8) |
++         ((sox_uint32_t)p[2] << 16) | ((sox_uint32_t)p[3] << 24);
++}
++
++/* Vorbis-style comment block: a vendor string then a list of comments, each
++ * one a length and that many bytes of UTF-8.  No framing bit in Speex. */
++static void read_comments(sox_format_t * ft, unsigned char const * data,
++                          size_t len)
++{
++  size_t pos = 0;
++  sox_uint32_t n, count, i;
++
++  if (len < 8)
++    return;
++  n = get32(data);
++  pos = 4;
++  if (n > len - pos - 4)
++    return;
++  pos += n;                          /* Skip the vendor string */
++  count = get32(data + pos);
++  pos += 4;
++  for (i = 0; i < count && pos + 4 <= len; ++i) {
++    char * text;
++
++    n = get32(data + pos);
++    pos += 4;
++    if (n > len - pos)
++      return;
++    text = lsx_calloc(n + 1, sizeof(*text));
++    memcpy(text, data + pos, n);
++    sox_append_comment(&ft->oob.comments, text);
++    free(text);
++    pos += n;
++  }
++}
++
++/* Duration is not in the header, so take it from the granule position of the
++ * last page.  Only for seekable files, and any doubt leaves the length unset
++ * rather than wrong. */
++static void guess_length(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  off_t here, end;
++  size_t tail, got, i;
++  unsigned char * buf;
++  ogg_int64_t granule = -1;
++
++  here = lsx_tell(ft);
++  if (here < 0 || lsx_seeki(ft, (off_t)0, SEEK_END) != 0)
++    return;
++  end = lsx_tell(ft);
++  if (end <= 0) {
++    lsx_seeki(ft, here, SEEK_SET);
++    return;
++  }
++  tail = end > 65536? 65536 : (size_t)end;
++  if (lsx_seeki(ft, end - (off_t)tail, SEEK_SET) != 0) {
++    lsx_seeki(ft, here, SEEK_SET);
++    return;
++  }
++  lsx_vcalloc(buf, tail);
++  got = lsx_readbuf(ft, buf, tail);
++
++  /* Walk forwards keeping the last page header that belongs to our stream:
++   * "OggS", version, type, then the 64-bit granule and the 32-bit serial. */
++  for (i = 0; i + 18 <= got; ++i)
++    if (!memcmp(buf + i, "OggS", (size_t)4) && buf[i + 4] == 0) {
++      ogg_int64_t g = 0;
++      sox_uint32_t serial = 0;
++      int b;
++
++      for (b = 7; b >= 0; --b)
++        g = (g << 8) | buf[i + 6 + b];
++      for (b = 3; b >= 0; --b)
++        serial = (serial << 8) | buf[i + 14 + b];
++      if (serial == (sox_uint32_t)p->os.serialno && g >= 0)
++        granule = g;
++    }
++
++  free(buf);
++  lsx_seeki(ft, here, SEEK_SET);
++
++  if (granule > 0)
++    ft->signal.length = (sox_uint64_t)granule * ft->signal.channels;
++}
++
++static int startread_speex(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_packet op;
++  SpeexHeader * header = NULL;
++  SpeexMode const * mode;
++  int extra_headers, i, tries;
++  spx_int32_t enh = 1;
++
++  ogg_sync_init(&p->oy);
++  p->last_granule = 0;
++
++  /* The Speex logical stream is the one whose first packet says so; skip
++   * anything else that may be multiplexed in, such as an Ogg Skeleton.  The
++   * beginning-of-stream pages all come first, so a handful of packets is
++   * plenty to look through before giving up on a file that is not Speex. */
++  for (tries = 0; ; ++tries) {
++    if (tries == 16 || !next_packet(ft, &op)) {
++      lsx_fail_errno(ft, SOX_EHDR, "input is not an Ogg Speex audio stream");
++      return SOX_EOF;
++    }
++    if (op.bytes >= 5 && !memcmp(op.packet, "Speex", (size_t)5))
++      break;
++  }
++
++  header = speex_packet_to_header((char *)op.packet, (int)op.bytes);
++  if (!header) {
++    lsx_fail_errno(ft, SOX_EHDR, "cannot read the Speex header");
++    return SOX_EOF;
++  }
++  if (header->mode < 0 || header->mode >= SPEEX_NB_MODES) {
++    lsx_fail_errno(ft, SOX_EFMT, "Speex mode %d does not exist in this version",
++                   (int)header->mode);
++    speex_header_free(header);
++    return SOX_EOF;
++  }
++  if (header->speex_version_id > 1) {
++    lsx_fail_errno(ft, SOX_EFMT,
++                   "this file uses Speex bit-stream version %d, which this "
++                   "version of libspeex cannot decode",
++                   (int)header->speex_version_id);
++    speex_header_free(header);
++    return SOX_EOF;
++  }
++
++  mode = speex_lib_get_mode((int)header->mode);
++  if (mode->bitstream_version != header->mode_bitstream_version) {
++    lsx_fail_errno(ft, SOX_EFMT,
++                   "this file was encoded with an incompatible version of "
++                   "Speex (bit-stream %d, this libspeex speaks %d)",
++                   (int)header->mode_bitstream_version, mode->bitstream_version);
++    speex_header_free(header);
++    return SOX_EOF;
++  }
++
++  p->st = speex_decoder_init(mode);
++  if (!p->st) {
++    lsx_fail_errno(ft, SOX_EOF, "cannot initialise the Speex decoder");
++    speex_header_free(header);
++    return SOX_EOF;
++  }
++  speex_decoder_ctl(p->st, SPEEX_SET_ENH, &enh);
++  speex_decoder_ctl(p->st, SPEEX_GET_FRAME_SIZE, &p->frame_size);
++  speex_decoder_ctl(p->st, SPEEX_GET_LOOKAHEAD, &p->lookahead);
++
++  p->channels = header->nb_channels < 2? 1 : 2;
++  p->nframes = header->frames_per_packet > 0? (int)header->frames_per_packet : 1;
++  extra_headers = (int)header->extra_headers;
++
++  if (p->channels == 2) {
++    SpeexCallback callback;
++    SpeexStereoState init = SPEEX_STEREO_STATE_INIT;
++
++    p->stereo = init;
++    callback.callback_id = SPEEX_INBAND_STEREO;
++    callback.func = speex_std_stereo_request_handler;
++    callback.data = &p->stereo;
++    speex_decoder_ctl(p->st, SPEEX_SET_HANDLER, &callback);
++  }
++
++  ft->signal.rate = header->rate;
++  ft->signal.channels = p->channels;
++  ft->encoding.encoding = SOX_ENCODING_SPEEX;
++  lsx_report("%s mode, %d Hz, %d channel(s), %d frame(s) per packet%s",
++             mode->modeName, (int)header->rate, p->channels, p->nframes,
++             header->vbr? ", VBR" : "");
++  speex_header_free(header);
++
++  /* Comment packet, then whatever extra headers the file declares. */
++  for (i = 0; i <= extra_headers; ++i) {
++    if (!next_packet(ft, &op)) {
++      lsx_fail_errno(ft, SOX_EHDR, "Ogg Speex stream ends in its headers");
++      return SOX_EOF;
++    }
++    if (i == 0)
++      read_comments(ft, op.packet, (size_t)op.bytes);
++  }
++
++  speex_bits_init(&p->bits);
++  lsx_vcalloc(p->frame, (size_t)p->frame_size * 2);
++  p->frame_pos = p->frame_len = 0;
++  p->frames_left = 0;
++
++  if (ft->seekable)
++    guess_length(ft);
++
++  return SOX_SUCCESS;
++}
++
++/* Decode one frame into p->frame and set frame_pos/frame_len to the part of
++ * it that is real audio.  Returns 0 when the stream is spent. */
++static int decode_frame(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_packet op;
++
++  for (;;) {
++    if (p->frames_left > 0) {
++      int ret, offset = 0, length = p->frame_size;
++
++      ret = speex_decode_int(p->st, &p->bits, p->frame);
++      --p->frames_left;
++      if (ret == -1) {          /* Terminator: nothing more in this packet */
++        p->frames_left = 0;
++        continue;
++      }
++      if (ret == -2) {
++        lsx_warn("decoding error: corrupted stream?");
++        p->frames_left = 0;
++        continue;
++      }
++      if (speex_bits_remaining(&p->bits) < 0) {
++        lsx_warn("decoding overflow: corrupted stream?");
++        p->frames_left = 0;
++        continue;
++      }
++      if (p->channels == 2)
++        speex_decode_stereo_int(p->frame, p->frame_size, &p->stereo);
++
++      /* Drop the encoder's lookahead at the start of the stream and the zero
++       * padding of the last frame, both of which the granule positions of the
++       * pages spell out. */
++      if (p->packet_no == 1 && p->frame_index == 0 && p->skip_samples > 0) {
++        offset = p->skip_samples + p->lookahead;
++        length = p->frame_size - offset;
++      }
++      if (p->packet_no == p->page_packets && p->skip_samples < 0) {
++        int packet_length = p->nframes * p->frame_size + p->skip_samples +
++                            p->lookahead;
++        length = packet_length - p->frame_index * p->frame_size;
++      }
++      if (offset < 0)
++        offset = 0;
++      if (offset > p->frame_size)
++        offset = p->frame_size;
++      if (length < 0)
++        length = 0;
++      if (length > p->frame_size - offset)
++        length = p->frame_size - offset;
++
++      ++p->frame_index;
++      p->frame_pos = (size_t)offset * p->channels;
++      p->frame_len = (size_t)(offset + length) * p->channels;
++      if (p->frame_len > p->frame_pos)
++        return 1;
++      continue;                 /* Frame was entirely padding */
++    }
++
++    if (!next_packet(ft, &op))
++      return 0;
++    speex_bits_read_from(&p->bits, (char *)op.packet, (int)op.bytes);
++    p->frames_left = p->nframes;
++    p->frame_index = 0;
++  }
++}
++
++static size_t read_samples_speex(
++    sox_format_t * ft, sox_sample_t * buf, size_t len)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  size_t done = 0;
++
++  while (done < len) {
++    if (p->frame_pos >= p->frame_len && !decode_frame(ft))
++      break;
++    buf[done++] = SOX_SIGNED_16BIT_TO_SAMPLE(p->frame[p->frame_pos], dummy);
++    ++p->frame_pos;
++  }
++  return done;
++}
++
++static int stopread_speex(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++
++  if (p->st)
++    speex_decoder_destroy(p->st);
++  speex_bits_destroy(&p->bits);
++  if (p->stream_init)
++    ogg_stream_clear(&p->os);
++  ogg_sync_clear(&p->oy);
++  free(p->frame);
++  return SOX_SUCCESS;
++}
++
++/*-------------------------------- Writing ---------------------------------*/
++
++static int write_page(sox_format_t * ft, ogg_page * og)
++{
++  if (lsx_writebuf(ft, og->header, (size_t)og->header_len) !=
++      (size_t)og->header_len)
++    return SOX_EOF;
++  if (lsx_writebuf(ft, og->body, (size_t)og->body_len) != (size_t)og->body_len)
++    return SOX_EOF;
++  return SOX_SUCCESS;
++}
++
++static int flush_pages(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_page og;
++
++  while (ogg_stream_flush(&p->os, &og))
++    if (write_page(ft, &og) != SOX_SUCCESS)
++      return SOX_EOF;
++  return SOX_SUCCESS;
++}
++
++static void put32(unsigned char * dest, size_t value)
++{
++  dest[0] = value & 0xff;
++  dest[1] = (value >> 8) & 0xff;
++  dest[2] = (value >> 16) & 0xff;
++  dest[3] = (value >> 24) & 0xff;
++}
++
++/* Build the comment packet: vendor string, then one length-prefixed string
++ * per comment.  SoX comments without a field name get one, as vorbis.c does. */
++static unsigned char * make_comments(sox_format_t * ft, int * length)
++{
++  static char const prefix[] = "Comment=";
++  char const * version = "unknown";
++  char vendor[64];
++  size_t count = sox_num_comments(ft->oob.comments);
++  size_t vendor_len, total, i, pos;
++  unsigned char * packet;
++
++  speex_lib_ctl(SPEEX_LIB_GET_VERSION_STRING, (void *)&version);
++  snprintf(vendor, sizeof(vendor), "Encoded with Speex %s", version);
++  vendor_len = strlen(vendor);
++
++  total = 4 + vendor_len + 4;
++  for (i = 0; i < count; ++i)
++    total += 4 + strlen(ft->oob.comments[i]) +
++             (strchr(ft->oob.comments[i], '=')? 0 : strlen(prefix));
++
++  lsx_vcalloc(packet, total);
++  put32(packet, vendor_len);
++  memcpy(packet + 4, vendor, vendor_len);
++  put32(packet + 4 + vendor_len, count);
++  pos = 4 + vendor_len + 4;
++
++  for (i = 0; i < count; ++i) {
++    int named = strchr(ft->oob.comments[i], '=') != NULL;
++    size_t len = strlen(ft->oob.comments[i]) + (named? 0 : strlen(prefix));
++
++    put32(packet + pos, len);
++    pos += 4;
++    if (!named) {
++      memcpy(packet + pos, prefix, strlen(prefix));
++      pos += strlen(prefix);
++    }
++    memcpy(packet + pos, ft->oob.comments[i], strlen(ft->oob.comments[i]));
++    pos += strlen(ft->oob.comments[i]);
++  }
++
++  *length = (int)total;
++  return packet;
++}
++
++static int startwrite_speex(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  SpeexHeader header;
++  SpeexMode const * mode;
++  ogg_packet op;
++  unsigned char * comments;
++  char * packet;
++  int packet_size, comments_size, modeID;
++  int rate = (int)(ft->signal.rate + .5);
++  double quality = DEFAULT_QUALITY;
++  int vbr = 0;
++
++  if (ft->signal.channels > 2) {
++    lsx_fail_errno(ft, SOX_EFMT, "Speex only supports 1 or 2 channels");
++    return SOX_EOF;
++  }
++  if (rate < 6000 || rate > 48000) {
++    lsx_fail_errno(ft, SOX_EFMT,
++                   "Speex needs a sample rate between 6000 and 48000 Hz; "
++                   "use the rate effect or -r to resample");
++    return SOX_EOF;
++  }
++  if (rate != 8000 && rate != 16000 && rate != 32000)
++    lsx_warn("Speex is only tuned for 8000, 16000 and 32000 Hz; %d Hz works "
++             "but may sound poor", rate);
++
++  /* -C is speexenc's quality scale.  A whole number asks for constant
++   * bit rate, anything in between switches the encoder to VBR. */
++  if (ft->encoding.compression != HUGE_VAL) {
++    if (ft->encoding.compression < 0 || ft->encoding.compression > 10) {
++      lsx_fail_errno(ft, SOX_EINVAL,
++                     "compression quality must be between 0 and 10");
++      return SOX_EOF;
++    }
++    quality = ft->encoding.compression;
++    vbr = quality != floor(quality);
++  }
++
++  modeID = rate > 25000? SPEEX_MODEID_UWB :
++           rate > 12500? SPEEX_MODEID_WB : SPEEX_MODEID_NB;
++  mode = speex_lib_get_mode(modeID);
++
++  p->channels = (int)ft->signal.channels;
++  p->nframes = 1;
++  p->st = speex_encoder_init(mode);
++  if (!p->st) {
++    lsx_fail_errno(ft, SOX_EOF, "cannot initialise the Speex encoder");
++    return SOX_EOF;
++  }
++  speex_encoder_ctl(p->st, SPEEX_SET_SAMPLING_RATE, &rate);
++  if (vbr) {
++    int on = 1;
++    float q = (float)quality;
++
++    speex_encoder_ctl(p->st, SPEEX_SET_VBR, &on);
++    speex_encoder_ctl(p->st, SPEEX_SET_VBR_QUALITY, &q);
++  } else {
++    int q = (int)quality;
++
++    speex_encoder_ctl(p->st, SPEEX_SET_QUALITY, &q);
++  }
++  speex_encoder_ctl(p->st, SPEEX_GET_FRAME_SIZE, &p->frame_size);
++  speex_encoder_ctl(p->st, SPEEX_GET_LOOKAHEAD, &p->lookahead);
++
++  ft->encoding.encoding = SOX_ENCODING_SPEEX;
++  lsx_report("%s mode, %d Hz, %d channel(s), quality %g%s", mode->modeName,
++             rate, p->channels, quality, vbr? " VBR" : "");
++
++  speex_bits_init(&p->bits);
++  lsx_vcalloc(p->cbits, (size_t)MAX_FRAME_BYTES);
++  lsx_vcalloc(p->inbuf, (size_t)p->frame_size * p->channels);
++  p->inbuf_len = 0;
++  p->total_in = p->total_samples = p->frames_written = 0;
++  p->nb_encoded = -p->lookahead;
++
++  ogg_stream_init(&p->os, (int)(INT_MAX & (int)RANQD1));
++  p->stream_init = 1;
++
++  speex_init_header(&header, rate, p->channels, mode);
++  header.frames_per_packet = p->nframes;
++  header.vbr = vbr;
++  header.nb_channels = p->channels;
++
++  memset(&op, 0, sizeof(op));
++  packet = speex_header_to_packet(&header, &packet_size);
++  op.packet = (unsigned char *)packet;
++  op.bytes = packet_size;
++  op.b_o_s = 1;
++  ogg_stream_packetin(&p->os, &op);
++  speex_header_free(packet);
++  /* The first page must hold nothing but the header packet. */
++  if (flush_pages(ft) != SOX_SUCCESS) {
++    lsx_fail_errno(ft, SOX_EOF, "error writing the Speex header");
++    return SOX_EOF;
++  }
++
++  comments = make_comments(ft, &comments_size);
++  memset(&op, 0, sizeof(op));
++  op.packet = comments;
++  op.bytes = comments_size;
++  op.packetno = 1;
++  ogg_stream_packetin(&p->os, &op);
++  free(comments);
++  if (flush_pages(ft) != SOX_SUCCESS) {
++    lsx_fail_errno(ft, SOX_EOF, "error writing the Speex comments");
++    return SOX_EOF;
++  }
++
++  return SOX_SUCCESS;
++}
++
++/* Encode whatever is in inbuf, zero padded if it is short of a full frame. */
++static int encode_frame(sox_format_t * ft, int last)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  ogg_packet op;
++  ogg_page og;
++  size_t have = p->inbuf_len;
++  size_t want = (size_t)p->frame_size * p->channels;
++  int nbytes;
++
++  if (have < want)
++    memset(p->inbuf + have, 0, (want - have) * sizeof(*p->inbuf));
++  p->inbuf_len = 0;
++
++  if (p->channels == 2)
++    speex_encode_stereo_int(p->inbuf, p->frame_size, &p->bits);
++  speex_encode_int(p->st, p->inbuf, &p->bits);
++  p->nb_encoded += p->frame_size;
++
++  speex_bits_insert_terminator(&p->bits);
++  nbytes = speex_bits_write(&p->bits, (char *)p->cbits, MAX_FRAME_BYTES);
++  speex_bits_reset(&p->bits);
++
++  memset(&op, 0, sizeof(op));
++  op.packet = p->cbits;
++  op.bytes = nbytes;
++  op.e_o_s = last;
++  op.granulepos = (p->frames_written + 1) * p->frame_size - p->lookahead;
++  if (op.granulepos > p->total_samples)
++    op.granulepos = p->total_samples;
++  op.packetno = 2 + p->frames_written;
++  ++p->frames_written;
++  ogg_stream_packetin(&p->os, &op);
++
++  while (ogg_stream_pageout(&p->os, &og))
++    if (write_page(ft, &og) != SOX_SUCCESS)
++      return SOX_EOF;
++  return SOX_SUCCESS;
++}
++
++static size_t write_samples_speex(
++    sox_format_t * ft, sox_sample_t const * buf, size_t len)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  size_t done = 0;
++  SOX_SAMPLE_LOCALS;
++
++  size_t want = (size_t)p->frame_size * p->channels;
++
++  while (done < len) {
++    size_t room = want - p->inbuf_len;
++    size_t n = len - done < room? len - done : room;
++    size_t i;
++
++    for (i = 0; i < n; ++i)
++      p->inbuf[p->inbuf_len + i] =
++          SOX_SAMPLE_TO_SIGNED_16BIT(buf[done + i], ft->clips);
++    p->inbuf_len += n;
++    p->total_in += n;
++    p->total_samples = p->total_in / p->channels;
++    done += n;
++
++    if (p->inbuf_len == want && encode_frame(ft, 0) != SOX_SUCCESS)
++      return done;
++  }
++  return done;
++}
++
++static int stopwrite_speex(sox_format_t * ft)
++{
++  priv_t * p = (priv_t *)ft->priv;
++  int result = SOX_SUCCESS;
++  int last;
++
++  /* One more frame at least, so that some packet carries end-of-stream, and
++   * as many as it takes for the encoder to catch up with its own lookahead.
++   * The granule positions tell the decoder to throw the padding away. */
++  do {
++    last = p->nb_encoded + p->frame_size >= p->total_samples;
++    if (encode_frame(ft, last) != SOX_SUCCESS) {
++      result = SOX_EOF;
++      break;
++    }
++  } while (!last);
++
++  if (result == SOX_SUCCESS)
++    result = flush_pages(ft);
++
++  if (p->st)
++    speex_encoder_destroy(p->st);
++  speex_bits_destroy(&p->bits);
++  ogg_stream_clear(&p->os);
++  free(p->cbits);
++  free(p->inbuf);
++  return result;
++}
++
++LSX_FORMAT_HANDLER(speex)
++{
++  static char const * const names[] = {"spx", "speex", NULL};
++  static unsigned const encodings[] = {SOX_ENCODING_SPEEX, 0, 0};
++  static sox_format_handler_t handler = {SOX_LIB_VERSION_CODE,
++    "Xiph.org's Ogg Speex lossy speech compression", names, 0,
++    startread_speex, read_samples_speex, stopread_speex,
++    startwrite_speex, write_samples_speex, stopwrite_speex,
++    NULL, encodings, NULL, sizeof(priv_t)
++  };
++  return &handler;
++}
++
++#else /* !HAVE_SPEEX */
++
++typedef int lsx_speex_unused_t; /* ISO C forbids an empty translation unit */
++
++#endif /* HAVE_SPEEX */

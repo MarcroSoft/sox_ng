@@ -51,6 +51,8 @@ jobs:
             mingw-w64-x86_64-libid3tag
             mingw-w64-x86_64-libpng
             mingw-w64-x86_64-speexdsp
+            mingw-w64-x86_64-speex
+            mingw-w64-x86_64-libogg
             mingw-w64-x86_64-opencore-amr
 
       # gsm-pakken er med vilje IKKE på listen, og den må ikke sættes tilbage.
@@ -206,6 +208,49 @@ jobs:
           patch -p1 --fuzz=0 < ../patches/ffmpeg-quote-filename.patch
           grep -q "cannot contain" src/util.c
 
+      # speex og speexdsp er to forskellige biblioteker med næsten samme navn.
+      # sox_ng har altid brugt speexdsp — det er preprocessoren bag -agc,
+      # -denoise og -dereverb — men aldrig selve codec'et. .spx kunne derfor
+      # kun læses, og kun gennem ffmpeg-pipen, fordi ffmpeg-handleren i
+      # src/ffmpeg.c melder sig på "spx" og "speex" uden at kunne skrive.
+      #
+      # Patchen lægger en rigtig src/speex.c ind: libogg til containeren,
+      # libspeex til codec'et, læsning og skrivning. Den registreres i
+      # formats.h før ffmpeg-blokken, så det er den native handler der findes,
+      # når endelsen slås op — sox_find_format tager den første der matcher.
+      # Dermed kan .spx læses uden en ffmpeg.exe i PATH, og skrives.
+      #
+      # Fem filer hænger sammen og skal alle med, ellers linker det ikke:
+      #   src/speex.c      selve handleren
+      #   src/formats.h    FORMAT(speex) bag #if HAVE_SPEEX
+      #   src/sox_ng.h     SOX_ENCODING_SPEEX sidst i sox_encoding_t, plus
+      #   src/formats.c    den matchende række i s_sox_encodings_info[] —
+      #                    et assert_static tæller dem og fejler ellers
+      #   src/Makefile.in  objektet og dets oversættelsesregel
+      #
+      # Makefile.in og ikke Makefile.am med vilje: releasen har allerede
+      # kørt automake, og rører man .am-filen, bliver den nyere end .in-filen,
+      # hvorefter Makefilens egen vedligeholdsregel prøver at køre automake om
+      # på et udgivet træ. Reglen her skriver ingen .Plo-afhængighedsfil, så
+      # den behøver heller ikke am--depfiles-maskineriet.
+      #
+      # configure.ac røres slet ikke; HAVE_SPEEX kommer fra CPPFLAGS nedenfor,
+      # på samme måde som HAVE_OPUSENC. Får en senere sox_ng-udgave selv en
+      # speex-handler, fejler patchen her frem for at overskrive den.
+      - name: Læg native Speex-handler ind (speex.c)
+        run: |
+          cd "$SRC"
+          if [ -f src/speex.c ]; then
+            echo "sox_ng-${{ github.event.inputs.version }} har selv en speex-handler."
+            echo "Fjern dette trin samt -DHAVE_SPEEX og -lspeex -logg i Configure."
+            exit 1
+          fi
+          patch -p1 --fuzz=0 < ../patches/speex-format.patch
+          grep -q "LSX_FORMAT_HANDLER(speex)" src/speex.c
+          grep -q "FORMAT(speex)" src/formats.h
+          grep -q "SOX_ENCODING_SPEEX" src/sox_ng.h
+          grep -q "libsox_ng_la-speex.lo" src/Makefile.in
+
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
       # ld scanner arkiverne fra venstre mod højre, og når libopusfile.a først er
@@ -251,6 +296,17 @@ jobs:
       # libopusenc kalder ind i libopus. Statisk scanner ld arkiverne fra
       # venstre, så OPUS_LIBS' eget -lopus er forlængst passeret, når
       # libopusenc.a trækkes ind — derfor skal -lopus gentages bagefter.
+      #
+      # -DHAVE_SPEEX og -lspeex -logg hører til speex-patchen ovenfor. Samme
+      # kneb som opusenc: releasens configure kender ikke libspeex og skriver
+      # intet om den i soxconfig.h, så #if HAVE_SPEEX ville stå tom. At de to
+      # -l står i LIBS og ikke i et *_LIBS fra configure er netop det, der
+      # holder dem sidst på linkerlinjen, hvor libsox_ng.a's referencer til
+      # speex_* og ogg_* kan slås op. libspeex kalder ikke selv ind i libogg —
+      # det er kun sox' egen speex.c, der bruger begge — så rækkefølgen mellem
+      # de to er ligegyldig. libogg er i forvejen med som afhængighed af
+      # libvorbis; den står eksplicit i pacman-listen, fordi vi nu linker den
+      # direkte og ikke vil have den til at forsvinde, hvis vorbis en dag gør.
       - name: Configure
         run: |
           set -o pipefail   # så en fejl i configure ikke skjules af tee
@@ -261,9 +317,9 @@ jobs:
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
-            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $(pkg-config --cflags opusfile)" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 -DHAVE_SPEEX=1 $(pkg-config --cflags opusfile)" \
             CFLAGS="-Os -ffunction-sections -fdata-sections" \
-            LIBS="-lmpg123 -lshlwapi -lopusenc -lopus" \
+            LIBS="-lmpg123 -lshlwapi -lopusenc -lopus -lspeex -logg" \
             LDFLAGS="-static-libgcc" 2>&1 | tee configure.out
 
       # Et bibliotek der ikke kan findes får ikke configure til at fejle — det
@@ -383,6 +439,60 @@ jobs:
           "./src/$EXE" -V3 test.wav -C 400 -r 48000 hoej.opus
           ls -la hoej.opus
           ./src/soxi_ng.exe hoej.opus
+          # Speex. Skrivning findes kun med patchen ovenfor, og læsning gik før
+          # den gennem ffmpeg-pipen. --help-format afslører hvilken handler der
+          # svarer på endelsen: står der "Ogg Speex", er det den native; stod
+          # der ffmpeg's tekst, havde rækkefølgen i formats.h tabt.
+          "./src/$EXE" --help-format spx
+          if ! "./src/$EXE" --help-format spx | grep -q "Ogg Speex"; then
+            echo "spx besvares ikke af den native handler"
+            exit 1
+          fi
+          # Speex tager kun 8, 16 og 32 kHz uden at brokke sig, så -r 16000;
+          # sox_ng lægger selv rate-effekten ind. Rundturen er tabsgivende,
+          # men granulepos i sidste Ogg-side siger præcis hvor mange samples
+          # der er, og både encoder og decoder skal ramme det tal.
+          "./src/$EXE" test.wav -r 16000 roegtest-16k.wav
+          "./src/$EXE" roegtest-16k.wav roegtest.spx
+          ls -la roegtest.spx
+          ./src/soxi_ng.exe roegtest.spx
+          "./src/$EXE" roegtest.spx roegtest-rundtur.wav
+          ind=$(./src/soxi_ng.exe -s roegtest-16k.wav)
+          ud=$(./src/soxi_ng.exe -s roegtest-rundtur.wav)
+          echo "samples ind: $ind, ud: $ud"
+          if [ "$ind" != "$ud" ]; then
+            echo "Speex-rundturen tabte eller tilføjede samples"
+            exit 1
+          fi
+          # Fra en pipe er filen ikke søgbar, så handleren kan hverken læse
+          # sidste sides granulepos på forhånd eller spole tilbage. Først
+          # kontrolleres at pipe-læsning overhovedet virker i dette miljø —
+          # med w64devkit's runtime falder sox_ng's stdin-læsning fra hinanden
+          # for alle formater, wav inklusive, og så siger en fejl her intet om
+          # Speex. Virker wav, skal spx også virke.
+          if cat roegtest-16k.wav | "./src/$EXE" -t wav - pipe-wav.wav 2>/dev/null &&
+             [ "$(./src/soxi_ng.exe -s pipe-wav.wav)" = "$ind" ]; then
+            cat roegtest.spx | "./src/$EXE" -t spx - pipe-rundtur.wav
+            udp=$(./src/soxi_ng.exe -s pipe-rundtur.wav)
+            echo "samples fra pipe: $udp"
+            if [ "$udp" != "$ud" ]; then
+              echo "Speex fra pipe gav $udp samples, fra fil $ud"
+              exit 1
+            fi
+            echo "ok: ogsaa korrekt fra en pipe"
+          else
+            echo "springer pipe-testen over: stdin-laesning virker ikke her i det hele taget"
+          fi
+          # -C er speexenc's kvalitetsskala 0-10. Et helt tal giver konstant
+          # bitrate, et med decimaler slår VBR til.
+          "./src/$EXE" roegtest-16k.wav -c 1 -C 3 lav-q.spx
+          "./src/$EXE" roegtest-16k.wav -c 1 -C 10 hoej-q.spx
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 8.5 vbr.spx
+          ls -la lav-q.spx hoej-q.spx vbr.spx
+          if [ "$(stat -c%s lav-q.spx)" -ge "$(stat -c%s hoej-q.spx)" ]; then
+            echo "-C slår ikke igennem: kvalitet 3 fylder ikke mindre end 10"
+            exit 1
+          fi
           # Glob med danske tegn i navnet. Uden win32-glob-patchen får sox_ng
           # navnet tilbage fra Windows i CP1252, mens dens egen fopen venter
           # UTF-8, og det her fejler med "No such file or directory".

@@ -86,6 +86,21 @@ jobs:
           # tager som ét argument, så ffmpeg åbner ingenting og pipen er tom.
           # Rammer m4a, der kun kan læses den vej.
           patch -p1 --fuzz=0 < ../patches/ffmpeg-quote-filename.patch
+          # Native Speex-handler. Uden den kan .spx kun læses, og kun gennem
+          # ffmpeg-pipen; med den kan den både læses og skrives af sox_ng
+          # selv. Se den lange forklaring i MSYS2-workflowet — det er de samme
+          # fem filer, og src/Makefile.in lappes med vilje i stedet for
+          # Makefile.am, så ingen automake-regel vågner på et udgivet træ.
+          if [ -f src/speex.c ]; then
+            echo "sox_ng-$V har selv en speex-handler."
+            echo "Fjern denne patch samt -DHAVE_SPEEX og -lspeex -logg i Configure."
+            exit 1
+          fi
+          patch -p1 --fuzz=0 < ../patches/speex-format.patch
+          grep -q "LSX_FORMAT_HANDLER(speex)" src/speex.c
+          grep -q "FORMAT(speex)" src/formats.h
+          grep -q "SOX_ENCODING_SPEEX" src/sox_ng.h
+          grep -q "libsox_ng_la-speex.lo" src/Makefile.in
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
       # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
@@ -126,9 +141,14 @@ jobs:
         run: |
           cd mxe
           make check-requirements MXE_TARGETS="$MXE_TARGET"
+          # speex er codec'et, speexdsp er preprocessoren bag -agc, -denoise
+          # og -dereverb; to forskellige biblioteker med næsten samme navn, og
+          # begge skal med. ogg følger allerede med vorbis, men står her,
+          # fordi src/speex.c linker den direkte.
           make MXE_TARGETS="$MXE_TARGET" -j$(nproc) JOBS=2 \
             flac lame libmad twolame vorbis opusfile libopusenc wavpack \
-            opencore-amr libpng file libltdl mpg123 libid3tag speexdsp
+            opencore-amr libpng file libltdl mpg123 libid3tag speexdsp \
+            speex ogg
 
       # Samme flag som MSYS2-buildet, med to forskelle: der er intet
       # -all-static at slås med, fordi MXE's .static-mål kun har statiske
@@ -146,10 +166,10 @@ jobs:
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="$MXE_TARGET-pkg-config" \
-            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 -DHAVE_SPEEX=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
             CFLAGS="-Os -ffunction-sections -fdata-sections" \
             LDFLAGS="-Wl,--gc-sections" \
-            LIBS="-lopusenc -lopus -lmpg123 -lshlwapi" 2>&1 | tee configure.out
+            LIBS="-lopusenc -lopus -lmpg123 -lshlwapi -lspeex -logg" 2>&1 | tee configure.out
 
       - name: Kontrollér at alle formater kom med
         run: |
@@ -192,6 +212,17 @@ jobs:
           printf "ustrippet:        %s\n" "$(stat -c%s /tmp/ustrippet.exe)"
           printf "strippet:         %s\n" "$(stat -c%s src/sox_ng.exe)"
           printf "GCC-strenge nu:   %s\n" "$(strings -a src/sox_ng.exe | grep -c 'GCC: (GNU)' || true)"
+          # Krydsbygget: exe'en kan ikke køres her, så røgtesten i MSYS2-
+          # workflowet er den eneste, der rent faktisk prøver Speex af.
+          # Til gengæld kan vi se, om handleren overhovedet blev linket med —
+          # --gc-sections smider sektioner, der ikke refereres, og havde
+          # FORMAT(speex) ikke stået i formats.h, ville hele speex.o ryge
+          # lydløst ud, præcis som et bibliotek der ikke blev fundet.
+          if ! strings -a src/sox_ng.exe | grep -q "Ogg Speex"; then
+            echo "Speex-handleren er ikke i exe'en."
+            exit 1
+          fi
+          echo "ok:               Speex-handleren er med"
 
       - name: Vis configure-log hvis noget gik galt
         if: failure()
