@@ -13,8 +13,21 @@
    FORMAT(sunau)
  #endif
 --- a/src/formats.c	2026-05-25 19:40:54.000000000 +0200
-+++ b/src/formats.c	2026-08-15 12:05:17.802638400 +0200
-@@ -304,6 +304,7 @@
++++ b/src/formats.c	2026-08-15 13:07:26.334077700 +0200
+@@ -87,6 +87,12 @@
+   CHECK(sndt  , 0, 0, ""     , 0,  6, "SOUND\x1a")
+   CHECK(vorbis, 0, 4, "OggS" , 29, 6, "vorbis")
+   CHECK(opus  , 0, 4, "OggS" , 28, 8, "OpusHead")
++#ifdef HAVE_SPEEX
++  /* Must come before the ffmpeg block's oga check: a Speex header page has
++   * granule position 0, so its first 14 bytes match oga's pattern exactly,
++   * and oga is answered only by the ffmpeg handler. */
++  CHECK(spx   , 0, 4, "OggS" , 28, 5, "Speex")
++#endif
+   CHECK(hcom  ,65, 4, "FSSD" , 128,4, "HCOM")
+ #if USING_FFMPEG
+   /* Must come before wav because it looks like a PCM WAV file */
+@@ -304,6 +310,7 @@
    {sox_encodings_lossy2, "LPC10"        , "LPC10"},
    {sox_encodings_lossy2, "Opus"         , "Opus"},
    {sox_encodings_none  , "DSD"          , "Direct Stream Digital"},
@@ -22,7 +35,7 @@
  };
  
  assert_static(array_length(s_sox_encodings_info) == SOX_ENCODINGS,
-@@ -354,6 +355,7 @@
+@@ -354,6 +361,7 @@
      case SOX_ENCODING_GSM:
      case SOX_ENCODING_VORBIS:
      case SOX_ENCODING_OPUS:
