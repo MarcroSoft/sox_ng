@@ -51,7 +51,28 @@ jobs:
             mingw-w64-x86_64-libid3tag
             mingw-w64-x86_64-libpng
             mingw-w64-x86_64-opencore-amr
-            mingw-w64-x86_64-gsm
+
+      # gsm-pakken er med vilje IKKE på listen, og den må ikke sættes tilbage.
+      #
+      # libsndfile.a bærer sin egen GSM 06.10 med præcis de symbolnavne, som
+      # systemets libgsm også bruger, og sox linker altid en GSM-implementering
+      # — wav.c bruger den til WAV GSM 6.10, og configure.ac har ingen knap til
+      # at slå den fra. Er begge til stede, dør linket på:
+      #
+      #   libsndfile.a(gsm_create.c.obj): multiple definition of `gsm_create';
+      #   libgsm.a(gsm_create.o): first defined here
+      #
+      # Uden pacman-pakken finder configure ingen ekstern libgsm og bruger
+      # sox' egen kopi i libgsm/ i stedet. Den omdøber alle 39 symboler til
+      # lsx_gsm_* gennem libgsm/aliases.h, som gsm.h og private.h inkluderer,
+      # så wav.c kalder lsx_gsm_create og libsndfiles gsm_create står alene.
+      #
+      # Begge dele virker altså samtidig: opsummeringen siger "gsm ... yes
+      # (in-tree)" og "sndfile ... yes", og WAV GSM 6.10 kan stadig skrives og
+      # læses. Det koster omkring 610 kB, som er libsndfile selv.
+      #
+      # Kommer gsm-pakken snigende ind som afhængighed af noget andet, vælger
+      # configure den eksterne igen, og linket falder med beskeden ovenfor.
 
       # MSYS2 pakker stadig lame 3.100 (bygget i 2023), så 4.0 hentes fra kilde
       # og installeres i /mingw64, hvor configure finder den af sig selv.
@@ -182,9 +203,11 @@ jobs:
       # med mindre man selv definerer FLAC__NO_DLL / LIBTWOLAME_STATIC. Uden dem
       # leder linkeren efter __imp_FLAC__* i .a-filerne og finder ingenting.
       #
-      # --without-sndfile: libsndfile.a har sin egen GSM 06.10 med præcis de
-      # samme symbolnavne som libgsm, og sox linker altid gsm (wav.c bruger det
-      # til WAV GSM 6.10). Statisk kan der kun være én af dem i exe'en.
+      # libsndfile er med — den giver W64, CAF, RF64 og en håndfuld eksotiske
+      # formater oveni. Den plads, den koster, står i pacman-listen øverst
+      # sammen med forklaringen på, hvorfor gsm-pakken ikke er der: uden den
+      # falder sox tilbage på sin egen libgsm, hvis symboler hedder lsx_gsm_*,
+      # og så er der ingen konflikt med libsndfiles indbyggede GSM 06.10.
       #
       # opusfile.h laver #include <opus_multistream.h> i stedet for
       # <opus/opus_multistream.h>, så headeren kun kan oversættes med
@@ -214,7 +237,6 @@ jobs:
           ./configure \
             --disable-shared --enable-static \
             --without-ao --without-pulseaudio --without-alsa --without-oss --without-sndio \
-            --without-sndfile \
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="pkg-config --static" \
@@ -232,7 +254,7 @@ jobs:
           cd "$SRC"
           mangler=""
           for f in flac gsm lpc10 "mp1/mp2/mp3" id3tag lame mad twolame \
-                   oggvorbis opus wavpack amrnb amrwb waveaudio; do
+                   oggvorbis opus sndfile wavpack amrnb amrwb waveaudio; do
             linje=$(grep -E "^ ?$f[ .]" configure.out | head -1 || true)
             case "$linje" in
               *yes*) echo "ok:      $linje" ;;
