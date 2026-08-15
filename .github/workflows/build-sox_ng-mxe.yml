@@ -20,7 +20,7 @@ on:
         default: "14.8.0.1"
 
 env:
-  MXE_COMMIT: 81ac034695207f597deec8947725c9bfc1ab4001
+  MXE_COMMIT: 98d61fc1fe02dc804320f53804d5231f4a98b6ce
   MXE_TARGET: x86_64-w64-mingw32.static
 
 jobs:
@@ -53,44 +53,19 @@ jobs:
           git -C mxe checkout "$MXE_COMMIT"
           git -C mxe log -1 --format="MXE på %h fra %ci"
 
-      # libopusenc findes ikke som MXE-pakke. Uden den kan sox_ng ikke skrive
-      # .opus, og så ville buildet ikke kunne sammenlignes med MSYS2-udgaven.
-      # Version og checksum er de samme, som MSYS2 bruger, og jeg har hentet
-      # tarballen og regnet efter.
-      - name: Tilføj libopusenc som MXE-pakke
+      # libopusenc manglede i MXE, så workflowet skrev sin egen src/libopusenc.mk
+      # her. Den blev sendt opstrøms og merget uændret 2026-08-15 som
+      # mxe/mxe#3326, så pakken kommer nu med træet — MXE_COMMIT skal bare være
+      # nyt nok. Vagten fejler, hvis pinnet peger på noget ældre, i stedet for
+      # at bygge videre uden opus-encoding og først afsløre det i røgtesten.
+      - name: Kontrollér at MXE har libopusenc
         run: |
-          cat > mxe/src/libopusenc.mk <<'MKEOF'
-          # This file is part of MXE. See LICENSE.md for licensing information.
-
-          PKG             := libopusenc
-          $(PKG)_WEBSITE  := https://opus-codec.org/
-          $(PKG)_DESCR    := High-level API for encoding .opus files
-          $(PKG)_IGNORE   :=
-          $(PKG)_VERSION  := 0.3
-          $(PKG)_CHECKSUM := f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c
-          $(PKG)_SUBDIR   := $(PKG)-$($(PKG)_VERSION)
-          $(PKG)_FILE     := $(PKG)-$($(PKG)_VERSION).tar.gz
-          $(PKG)_URL      := https://downloads.xiph.org/releases/opus/$($(PKG)_FILE)
-          $(PKG)_DEPS     := cc opus
-
-          define $(PKG)_UPDATE
-              $(WGET) -q -O- 'https://downloads.xiph.org/releases/opus/' | \
-              $(SED) -n 's,.*libopusenc-\([0-9][^>]*\)\.tar\.gz.*,\1,p' | \
-              grep -v 'alpha' | \
-              grep -v 'beta' | \
-              $(SORT) -Vr | \
-              head -1
-          endef
-
-          define $(PKG)_BUILD
-              cd '$(1)' && ./configure \
-                  $(MXE_CONFIGURE_OPTS) \
-                  --disable-doc
-              $(MAKE) -C '$(1)' -j '$(JOBS)'
-              $(MAKE) -C '$(1)' -j 1 install
-          endef
-          MKEOF
-          cat mxe/src/libopusenc.mk
+          if [ ! -f mxe/src/libopusenc.mk ]; then
+            echo "MXE_COMMIT er ældre end mxe/mxe#3326, hvor libopusenc kom ind."
+            echo "Bump det til f514c8e eller nyere."
+            exit 1
+          fi
+          grep -E "_VERSION|_CHECKSUM" mxe/src/libopusenc.mk
 
       # Ligger før det lange build med vilje: fejler en patch, koster det et
       # minut at opdage i stedet for to timer.
