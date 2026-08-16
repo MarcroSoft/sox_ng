@@ -54,6 +54,7 @@ jobs:
             mingw-w64-x86_64-speex
             mingw-w64-x86_64-libogg
             mingw-w64-x86_64-opencore-amr
+            mingw-w64-x86_64-lame
 
       # gsm-pakken er med vilje IKKE på listen, og den må ikke sættes tilbage.
       #
