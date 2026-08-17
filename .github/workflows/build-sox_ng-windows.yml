@@ -215,6 +215,59 @@ jobs:
           grep -q "SOX_ENCODING_SPEEX" src/sox_ng.h
           grep -q "libsox_ng_la-speex.lo" src/Makefile.in
 
+      # En .wav-fil behøver ikke indeholde PCM. Formatkoden 0x0055 i fmt-
+      # chunken betyder, at data-chunken er en almindelig MP3-strøm med en
+      # RIFF-indpakning udenom — det er sådan gamle ACM-encodere, Windows'
+      # egen lydoptager og `ffmpeg -c:a libmp3lame -f wav` skriver MP3. Indtil
+      # nu sagde sox_ng bare:
+      #
+      #   file encoding 0x0055 (MP3) is not supported
+      #
+      # og libmad lå lige ved siden af og kunne have afkodet den.
+      #
+      # Patchen lader wav.c hente mp3-handleren med sox_find_format("mp3") og
+      # give den arbejdet — begge veje. Seks filer:
+      #   src/wav.c        genkender 0x0055 og 0x0050 (MP1/MP2) ved læsning og
+      #                    skriver dem med `-t wavmp3'. Skifter ft->priv ud
+      #                    omkring hvert kald ind i mp3-handleren, som ellers
+      #                    ville skrive oven i wav'ens egne felter
+      #   src/formats.h    FORMAT(wavmp3)
+      #   src/mp3-mad.c    spoler tilbage til ft->data_start i stedet for til
+      #                    filens begyndelse — ellers lander den i RIFF-
+      #                    headeren, både når varigheden skal måles og ved
+      #                    `trim`
+      #   src/mp3-lame.c   det samme den anden vej: LAME spoler tilbage til
+      #                    starten af MPEG-strømmen for at skrive sin Xing-
+      #                    ramme, og uden data_start rammer den RIFF-headeren
+      #   src/formats_i.c  lsx_readbuf() standser ved ft->data_end
+      #   src/sox_ng.h     selve feltet data_end
+      #
+      # data_end er ikke pynt: uden den læser libmad videre forbi data-chunken
+      # ind i en efterfølgende LIST- eller id3-chunk, og starter den tilfældigt
+      # med to bytes, der ligner et MPEG-sync-ord, kommer der en ekstra ramme
+      # støj ud. Målt: 133632 samples i stedet for 132480.
+      #
+      # Skrivning er en handler for sig, `wavmp3', og ikke bare et navn mere
+      # på wav-handleren. Grunden står i wav.c: listen over encodings en
+      # handler kan skrive er også den, sox_ng.c slår op i, når den afgør, om
+      # outputfilen bare kan beholde inputfilens encoding. Stod MP3 på
+      # wav-handlerens liste, ville `sox_ng x.mp3 x.wav' stille og roligt
+      # aflevere en MP3 i en RIFF-indpakning i stedet for den PCM, man bad om.
+      # Røgtesten nedenfor holder øje med netop det.
+      #
+      # Meldt opstrøms? Nej — kun her indtil videre.
+      - name: Læs og skriv MP3 i en RIFF-indpakning (wav.c)
+        run: |
+          cd "$SRC"
+          patch -p1 --fuzz=0 < ../patches/wav-mp3.patch
+          grep -q "startread_mpeg_wav" src/wav.c
+          grep -q "startwrite_mpeg_wav" src/wav.c
+          grep -q "LSX_FORMAT_HANDLER(wavmp3)" src/wav.c
+          grep -q "FORMAT(wavmp3)" src/formats.h
+          grep -q "data_end" src/sox_ng.h
+          grep -q "mad_rewind" src/mp3-mad.c
+          grep -q "lame_seek_to_start" src/mp3-lame.c
+
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
       # ld scanner arkiverne fra venstre mod højre, og når libopusfile.a først er
@@ -457,6 +510,116 @@ jobs:
             echo "-C slår ikke igennem: kvalitet 3 fylder ikke mindre end 10"
             exit 1
           fi
+          # MP3 i en RIFF-indpakning, fmt-kode 0x0055. Ingen af de encodere,
+          # der er med her, laver sådan en fil, så den bygges i hånden: sox_ng
+          # koder lyden til MP3, og resten er ren header. le() skriver et tal
+          # ud som rå little-endian bytes. Vejen om ad "%b" og "\0nnn" er den
+          # der virker: kommandosubstitutionen giver teksten "000", som printf
+          # så laver om til en NUL-byte — omvendt ville NUL'en falde på gulvet
+          # undervejs, for kommandosubstitution kan ikke bære den.
+          "./src/$EXE" test.wav -C 128 roegtest.mp3
+          le() {  # le <tal> <antal bytes>
+            local v=$1 n=$2 i
+            for ((i = 0; i < n; i++)); do
+              printf '%b' "\0$(printf '%03o' $(( (v >> (8 * i)) & 255 )))"
+            done
+          }
+          mp3size=$(stat -c%s roegtest.mp3)
+          samples=$(./src/soxi_ng.exe -s test.wav)
+          {
+            printf 'RIFF'; le $((4 + 8+30 + 8+4 + 8+mp3size)) 4; printf 'WAVE'
+            printf 'fmt '; le 30 4
+            le 85 2         # wFormatTag = WAVE_FORMAT_MPEGLAYER3
+            le 2 2          # nChannels
+            le 44100 4      # nSamplesPerSec
+            le 16000 4      # nAvgBytesPerSec = 128 kbps
+            le 1 2          # nBlockAlign
+            le 0 2          # wBitsPerSample: 0, som i alle den slags filer
+            le 12 2         # cbSize: resten er MPEGLAYER3WAVEFORMAT
+            le 1 2          # wID = MPEGLAYER3_ID_MP3
+            le 2 4          # fdwFlags = MPEGLAYER3_FLAG_PADDING_OFF
+            le 1 2          # nBlockSize
+            le 1 2          # nFramesPerBlock
+            le 1393 2       # nCodecDelay
+            printf 'fact'; le 4 4; le $((samples / 2)) 4
+            printf 'data'; le $mp3size 4
+          } > mp3i.wav
+          cat roegtest.mp3 >> mp3i.wav
+          ./src/soxi_ng.exe mp3i.wav
+          if ! ./src/soxi_ng.exe -e mp3i.wav | grep -qi MPEG; then
+            echo "0x0055 blev ikke genkendt som MPEG-lyd"
+            exit 1
+          fi
+          # Den samme MP3-strøm med og uden RIFF-indpakningen skal give
+          # nøjagtig den samme lyd ud. Det er hele pointen, og det er også
+          # den eneste facitliste vi har, når encoderens forsinkelse er med.
+          "./src/$EXE" mp3i.wav mp3i-ud.wav
+          "./src/$EXE" roegtest.mp3 bar-ud.wav
+          echo "samples: indpakket $(./src/soxi_ng.exe -s mp3i-ud.wav), bar $(./src/soxi_ng.exe -s bar-ud.wav)"
+          if ! cmp mp3i-ud.wav bar-ud.wav; then
+            echo "MP3 i wav gav ikke det samme som den bare mp3"
+            exit 1
+          fi
+          # Og en kopi med en chunk hængt bag data-chunken, fyldt med 0xff,
+          # som ligner starten på et MPEG-sync-ord. Uden ft->data_end læser
+          # libmad videre ind i den og lægger en ramme støj til.
+          cp mp3i.wav mp3i-hale.wav
+          { printf 'LIST'; le 44 4; printf 'INFO'
+            printf 'ISFT'; le 32 4; head -c 32 /dev/zero | tr '\000' '\377'
+          } >> mp3i-hale.wav
+          "./src/$EXE" mp3i-hale.wav hale-ud.wav
+          if ! cmp hale-ud.wav mp3i-ud.wav; then
+            echo "en chunk efter data-chunken slap med ind i lyden"
+            exit 1
+          fi
+          echo "ok: MP3 i RIFF-indpakning, ogsaa med en chunk bagefter"
+          # Spoling: seek_wav sender den videre til seek_mad, som tæller
+          # rammer fra ft->data_start og ikke fra filens begyndelse.
+          "./src/$EXE" mp3i.wav klip-indpakket.wav trim 0.4
+          "./src/$EXE" roegtest.mp3 klip-bar.wav trim 0.4
+          cmp klip-indpakket.wav klip-bar.wav
+          echo "ok: trim rammer det samme sted i begge"
+
+          # Og den anden vej: -t wavmp3 lægger MP3'en i data-chunken selv.
+          "./src/$EXE" test.wav -t wavmp3 skriv.wav
+          ./src/soxi_ng.exe skriv.wav
+          if ! ./src/soxi_ng.exe -e skriv.wav | grep -qi MPEG; then
+            echo "-t wavmp3 skrev ikke MPEG-lyd"
+            exit 1
+          fi
+          # Samme lyd som en bar mp3 med samme indstillinger. Det er den
+          # eneste facitliste der findes, når encoderens egen forsinkelse er
+          # med i tallet, og den viser samtidig at det er den samme encoder.
+          "./src/$EXE" test.wav bar.mp3
+          "./src/$EXE" skriv.wav skriv-ud.wav
+          "./src/$EXE" bar.mp3 bar-mp3-ud.wav
+          if ! cmp skriv-ud.wav bar-mp3-ud.wav; then
+            echo "-t wavmp3 gav ikke samme lyd som en bar mp3"
+            exit 1
+          fi
+          # VBR. Her spoler LAME tilbage til starten af MPEG-strømmen for at
+          # skrive sin Xing-ramme; uden ft->data_start lander den skrivning
+          # oven i RIFF-headeren, og så er filen ikke en wav længere.
+          "./src/$EXE" test.wav -C -2 -t wavmp3 vbr.wav
+          if [ "$(head -c 4 vbr.wav)" != "RIFF" ]; then
+            echo "VBR-taggen blev skrevet oven i RIFF-headeren"
+            head -c 16 vbr.wav | xxd
+            exit 1
+          fi
+          "./src/$EXE" vbr.wav vbr-ud.wav
+          ls -la skriv.wav vbr.wav
+          # Og det vigtigste: det her må ikke smitte af på almindelig
+          # wav-udskrivning. `sox_ng x.mp3 x.wav` skal stadig give PCM, ikke en
+          # MP3 i en RIFF-indpakning. Det er hele grunden til at wavmp3 er en
+          # handler for sig.
+          "./src/$EXE" bar.mp3 fra-mp3.wav
+          if ! ./src/soxi_ng.exe -e fra-mp3.wav | grep -qi "Signed Integer PCM"; then
+            echo "mp3 ind gav ikke PCM ud i en almindelig .wav:"
+            ./src/soxi_ng.exe fra-mp3.wav
+            exit 1
+          fi
+          echo "ok: -t wavmp3 skriver, og almindelig .wav er uroert"
+
           # Glob med danske tegn i navnet. Uden win32-glob-patchen får sox_ng
           # navnet tilbage fra Windows i CP1252, mens dens egen fopen venter
           # UTF-8, og det her fejler med "No such file or directory".

@@ -1,0 +1,656 @@
+--- a/src/sox_ng.h
++++ b/src/sox_ng.h
+@@ -1548,6 +1548,7 @@
+   lsx_io_type      io_type;         /**< Stores whether this is a file, pipe or URL */
+   sox_uint64_t     tell_off;        /**< Current offset within file */
+   sox_uint64_t     data_start;      /**< Offset at which headers end and sound data begins (set by lsx_check_read_params) */
++  sox_uint64_t     data_end;        /**< Offset at which sound data ends, or 0 for "read to the end of the file": lsx_readbuf() will not read past it */
+   sox_format_handler_t handler;     /**< Format handler for this file */
+   void             * priv;          /**< Format handler's private data area */
+ };
+--- a/src/formats.h
++++ b/src/formats.h
+@@ -66,6 +66,10 @@
+   FORMAT(voc)
+   FORMAT(vox)
+   FORMAT(wav)
++  /* Same file, same code: RIFF with an MP3 stream in the data chunk.
++   * A handler of its own so that only an explicit -t wavmp3 selects it;
++   * see the comment on LSX_FORMAT_HANDLER(wavmp3) in wav.c. */
++  FORMAT(wavmp3)
+   FORMAT(wsd)
+   FORMAT(wve)
+   FORMAT(xa)
+--- a/src/formats_i.c
++++ b/src/formats_i.c
+@@ -106,6 +106,20 @@
+   size_t ret;
+   size_t bytes_read = 0;
+ 
++  /* If the caller has said where the sound data ends, don't read past it.
++   * wav.c sets this for MPEG audio, whose decoder is handed the file itself
++   * and would otherwise run on into whatever chunk follows the data chunk.
++   * Only set it once the header has been read, that is, once lsx_unreadbuf()
++   * has nothing left pending, because lsx_tell() doesn't account for that. */
++  if (ft->data_end) {
++    sox_uint64_t here = (sox_uint64_t)lsx_tell(ft);
++
++    if (here >= ft->data_end)
++      return 0;
++    if (ft->data_end - here < len)
++      len = (size_t)(ft->data_end - here);
++  }
++
+   if (ft->pending_count) {
+     bytes_read = min(len, ft->pending_count);
+     memcpy(buf, ft->pending_bytes, bytes_read);
+--- a/src/mp3-mad.c
++++ b/src/mp3-mad.c
+@@ -129,6 +129,21 @@
+   t->fraction = (unsigned long)((d - t->seconds) * MAD_TIMER_RESOLUTION + .5);
+ }
+ 
++/* Go back to the first byte of the MPEG stream.
++ *
++ * In an .mp1, .mp2 or .mp3 file that is the first byte of the file and
++ * ft->data_start is 0, so this is lsx_rewind() as it always was.  The same
++ * decoder is also used for MPEG audio wrapped in a RIFF file, where wav.c
++ * has set ft->data_start to the offset of the data chunk and rewinding to
++ * the top of the file would land us in the WAV header instead. */
++static void mad_rewind(sox_format_t * ft)
++{
++  if (ft->data_start)
++    lsx_seeki(ft, (off_t)ft->data_start, SEEK_SET);
++  else
++    lsx_rewind(ft);
++}
++
+ static size_t mp3_duration_ms(sox_format_t * ft)
+ {
+   priv_t              * p = (priv_t *) ft->priv;
+@@ -205,9 +220,13 @@
+       }
+       else vbr |= mad_header.bitrate != initial_bitrate;
+ 
+-      /* If not VBR, we can time just a few frames then extrapolate */
++      /* If not VBR, we can time just a few frames then extrapolate.
++       * ft->data_start and ft->data_end are both 0 for an .mp3 file and the
++       * bounds of the data chunk when wav.c is having MPEG audio decoded. */
+       if (++frames == 25 && !vbr) {
+-        mad_timer_mult(&time, (double)(lsx_filelength(ft) - tagsize) / consumed);
++        sox_uint64_t mpeg_end = ft->data_end ? ft->data_end : lsx_filelength(ft);
++
++        mad_timer_mult(&time, (double)(mpeg_end - ft->data_start - tagsize) / consumed);
+         lsx_debug("got approx. duration by CBR extrapolation");
+         break;
+       }
+@@ -217,7 +236,7 @@
+   p->mad_frame_finish(&mad_frame);
+   mad_header_finish(&mad_header);
+   p->mad_stream_finish(&mad_stream);
+-  lsx_rewind(ft);
++  mad_rewind(ft);
+   return p->mad_timer_count(time, MAD_UNITS_MILLISECONDS);
+ }
+ 
+@@ -351,7 +370,7 @@
+   if (ft->seekable) {
+ #ifdef USING_ID3TAG
+     lsx_id3_read_tag(ft, sox_true);
+-    lsx_rewind(ft);
++    mad_rewind(ft);
+     if (!ft->signal.length)
+ #endif
+       if (!ignore_length) {
+@@ -568,7 +587,7 @@
+   uint64_t to_skip_samples = 0;
+ 
+   /* Reset all */
+-  lsx_rewind(ft);
++  mad_rewind(ft);
+   mad_timer_reset(&p->Timer);
+   p->FrameCount = 0;
+ 
+--- a/src/mp3-lame.c
++++ b/src/mp3-lame.c
+@@ -153,13 +153,25 @@
+ UNUSED static int id3tag_set_fieldvalue_stub(lame_global_flags * gfp UNUSED, const char *fieldvalue UNUSED)
+   { return 0; }
+ 
++/* Go to the first byte of the MPEG stream we are writing, plus an offset.
++ *
++ * In an .mp3 file that is the start of the file and ft->data_start is 0, so
++ * this is the plain seek it always was.  The same encoder is also used for
++ * MPEG audio in a RIFF wrapper, where wav.c has set ft->data_start past the
++ * header it wrote, and seeking to 0 would rewrite the RIFF header with an
++ * ID3 or VBR tag. */
++static int lame_seek_to_start(sox_format_t * ft, off_t offset)
++{
++  return lsx_seeki(ft, (off_t)ft->data_start + offset, SEEK_SET);
++}
++
+ static int get_id3v2_tag_size(sox_format_t * ft)
+ {
+   size_t bytes_read;
+   int id3v2_size;
+   unsigned char id3v2_header[10];
+ 
+-  if (lsx_seeki(ft, (off_t)0, SEEK_SET) != 0) {
++  if (lame_seek_to_start(ft, (off_t)0) != 0) {
+     lsx_warn("cannot update id3 tag - failed to seek to beginning");
+     return SOX_EOF;
+   }
+@@ -236,7 +248,7 @@
+     else
+       lsx_warn("cannot update track length info - failed to adjust tag size");
+   } else {
+-    if (lsx_seeki(ft, (off_t)0, SEEK_SET))
++    if (lame_seek_to_start(ft, (off_t)0))
+       lsx_warn("cannot rewrite Id3v2 tag");
+       
+     /* Overwrite the Id3v2 tag (this time TLEN should be accurate) */
+@@ -277,7 +289,7 @@
+     size_t lametag_size;
+     uint8_t buffer[MAXFRAMESIZE];
+ 
+-    if (lsx_seeki(ft, (off_t)id3v2_size, SEEK_SET)) {
++    if (lame_seek_to_start(ft, (off_t)id3v2_size)) {
+       lsx_warn("cannot write VBR tag - seek to tag block failed");
+       return;
+     }
+--- a/src/wav.c
++++ b/src/wav.c
+@@ -89,6 +89,14 @@
+     size_t         gsmbytecount;    /* Count of bytes written to data block */
+     sox_bool       isRF64;          /* True if file being read is a RF64 */
+     uint64_t       ds64_dataSize;   /* Size of data chunk from ds64 header */
++
++    /* The following are used by MPEG audio (.wav files whose data chunk
++     * holds an MP1, MP2 or MP3 stream), which the mp3 format handler
++     * decodes and encodes on our behalf; see startread_mpeg_wav() and
++     * startwrite_mpeg_wav() */
++    sox_format_handler_t const *mp3_handler;
++    void          *mp3_priv;        /* That handler's private data area */
++    uint64_t       mp3_dataLength;  /* Bytes it wrote, known only at the end */
+ } priv_t;
+ 
+ static char *wav_format_str(unsigned wFormatTag);
+@@ -774,6 +782,136 @@
+   return SOX_EOF;
+ }
+ 
++/****************************************************************************/
++/* MPEG audio (WAVE_FORMAT_MPEG and WAVE_FORMAT_MPEGLAYER3) Support         */
++/****************************************************************************/
++
++/* The data chunk of these files is a plain MPEG-1 elementary stream: byte for
++ * byte what an .mp2 or .mp3 file is made of, only with a RIFF wrapper round
++ * it.  Rather than have a second copy of libmad in here, we let the "mp3"
++ * format handler decode it.
++ *
++ * That handler keeps its state in ft->priv, which is already taken by ours,
++ * so each of the four places that call into it swaps in a private area of
++ * its own and swaps ours back afterwards.  Everything else in ft is deliberately shared:
++ * the FILE *, the signal and encoding info it fills in, and ft->data_start,
++ * which startread_wav() has already pointed at the data chunk and which is
++ * where mp3-mad.c rewinds to.
++ *
++ * It reads the file for itself rather than being fed the data chunk, so
++ * ft->data_end stops it at the end of that chunk.  Without it a trailing
++ * LIST or id3 chunk that happened to start with a byte pair that looks like
++ * an MPEG sync word would be decoded as another frame of audio.
++ */
++static int startread_mpeg_wav(sox_format_t * ft, uint64_t qwDataLength)
++{
++    priv_t *     wav = (priv_t *) ft->priv;
++    sox_format_handler_t const * handler = sox_find_format("mp3", sox_false);
++    unsigned     header_channels = ft->signal.channels;
++    sox_rate_t   header_rate = ft->signal.rate;
++    int rc;
++
++    if (!handler || !handler->startread || !handler->read) {
++        lsx_fail_errno(ft, SOX_EHDR,
++            "this build has no decoder for %s audio in a WAV file",
++            wav_format_str(wav->formatTag));
++        return SOX_EOF;
++    }
++    wav->mp3_handler = handler;
++    wav->mp3_priv = lsx_calloc((size_t)1, handler->priv_size);
++
++    /* Not when the data chunk carries one of the "length unknown" markers:
++     * then the rest of the file is all we have to go on.  The limit is set
++     * here and not where the data chunk is found because startread_wav()
++     * reads past it on purpose, looking for a trailing LIST chunk. */
++    if (!wav->ignoreSize)
++        ft->data_end = wav->dataStart + qwDataLength;
++
++    /* startread_mad() works out the length by scanning the frames unless
++     * ft->signal.length says not to bother.  wav->ignoreSize is that same
++     * flag, which startread_wav() took out of ft->signal.length before
++     * overwriting it - and it is also set when the data chunk carries one of
++     * the "length unknown" markers, where scanning would be just as futile. */
++    ft->signal.length = wav->ignoreSize ? SOX_IGNORE_LENGTH : SOX_UNSPEC;
++
++    ft->priv = wav->mp3_priv;
++    rc = handler->startread(ft);
++    ft->priv = wav;
++
++    if (rc != SOX_SUCCESS) {
++        free(wav->mp3_priv);
++        wav->mp3_priv = NULL;
++        return rc;
++    }
++
++    /* The rate, the channel count and the encoding (MP1, MP2 or MP3) now come
++     * from the MPEG frames themselves, which know better than the fmt chunk
++     * does.  A file where the two disagree is malformed, so say so. */
++    if (ft->signal.channels != header_channels)
++        lsx_warn("fmt chunk says %u channel%s but the MPEG stream has %u",
++                 header_channels, header_channels == 1 ? "" : "s",
++                 ft->signal.channels);
++    if (ft->signal.rate != header_rate)
++        lsx_warn("fmt chunk says %g samples/sec but the MPEG stream has %g",
++                 header_rate, ft->signal.rate);
++
++    if (ft->signal.length && ft->signal.length != SOX_IGNORE_LENGTH)
++        wav->numSamples = ft->signal.length / ft->signal.channels;
++    else {
++        wav->numSamples = 0;
++        wav->ignoreSize = 1;
++        ft->signal.length = SOX_UNSPEC;
++    }
++
++    return SOX_SUCCESS;
++}
++
++/* The other direction, for the "wavmp3" spelling of this format: let the mp3
++ * handler encode into the data chunk.  Same swapping of ft->priv, and
++ * ft->data_start is again what keeps the borrowed handler in its own half of
++ * the file - mp3-lame.c seeks back to it to rewrite its VBR tag, and without
++ * it that write would land on top of the RIFF header.
++ *
++ * Called from startwrite_wav() once the header is on disk, so that
++ * lsx_tell() here is the first byte of the data chunk.
++ */
++static int startwrite_mpeg_wav(sox_format_t * ft)
++{
++    priv_t *     wav = (priv_t *) ft->priv;
++    sox_format_handler_t const * handler = sox_find_format("mp3", sox_false);
++    sox_comments_t comments;
++    int rc;
++
++    if (!handler || !handler->startwrite || !handler->write) {
++        lsx_fail_errno(ft, SOX_EFMT,
++                       "this build has no MP3 encoder to write `%s' with",
++                       ft->filename);
++        return SOX_EOF;
++    }
++    wav->mp3_handler = handler;
++    wav->mp3_priv = lsx_calloc((size_t)1, handler->priv_size);
++    wav->dataStart = lsx_tell(ft);
++    ft->data_start = wav->dataStart;
++
++    /* Plain .wav output drops comments - wavwritehdr() writes no LIST chunk -
++     * so they are hidden from the encoder here too.  Otherwise it would open
++     * the data chunk with an ID3v2 tag, which is the last thing the elderly
++     * software that wants a RIFF wrapper is expecting to find there. */
++    comments = ft->oob.comments;
++    ft->oob.comments = NULL;
++    ft->priv = wav->mp3_priv;
++    rc = handler->startwrite(ft);
++    ft->priv = wav;
++    ft->oob.comments = comments;
++
++    if (rc != SOX_SUCCESS) {
++        free(wav->mp3_priv);
++        wav->mp3_priv = NULL;
++        return rc;
++    }
++    return SOX_SUCCESS;
++}
++
+ static const char read_error_msg[] = "file is truncated";
+ #define read_error() { \
+     lsx_fail_errno(ft, SOX_EOF, read_error_msg); \
+@@ -986,6 +1124,13 @@
+             lsx_report("user options are overriding the encoding in the file header");
+         break;
+ 
++    case WAVE_FORMAT_MPEG:
++    case WAVE_FORMAT_MPEGLAYER3:
++        /* Which of MP1, MP2 and MP3 it is isn't in the fmt chunk in any form
++         * we can trust, so the encoding is left for startread_mpeg_wav() to
++         * take from the first MPEG frame at the end of this function. */
++        break;
++
+     default:
+         return wavfail(ft);
+     }
+@@ -1153,6 +1298,15 @@
+         len -= 2;
+         break;
+ 
++    case WAVE_FORMAT_MPEG:
++    case WAVE_FORMAT_MPEGLAYER3:
++        /* wBitsPerSample is 0 in these files: the fmt chunk describes the
++         * MPEG stream, not the samples that fall out of the decoder.  The
++         * rest of the extended part (wID, fdwHeadLayer and friends) tells us
++         * nothing we don't get from the frames, so it is skipped below. */
++        bytespersample = 2;  /* AFTER de-compression */
++        break;
++
+     default:
+       bytespersample = (wBitsPerSample + 7)/8;
+ 
+@@ -1248,6 +1402,14 @@
+         ft->signal.length = wav->numSamples*ft->signal.channels;
+         break;
+ 
++    case WAVE_FORMAT_MPEG:
++    case WAVE_FORMAT_MPEGLAYER3:
++        /* How many samples the data chunk holds depends on the contents of
++         * its MPEG frames, not on its size, so both of these are filled in
++         * by startread_mpeg_wav() below. */
++        wav->numSamples = 0;
++        break;
++
+     default:
+         if (ft->encoding.bits_per_sample == 0)
+         {
+@@ -1423,6 +1585,13 @@
+         if (lsx_seeki(ft,(off_t)wav->dataStart,SEEK_SET))
+ 	    read_error();
+     }
++
++    /* Hand MPEG audio over to the mp3 handler now that we are back at the
++     * start of the data chunk, which is where it will expect to find it. */
++    if (wav->formatTag == WAVE_FORMAT_MPEG ||
++        wav->formatTag == WAVE_FORMAT_MPEGLAYER3)
++        return startread_mpeg_wav(ft, qwDataLength);
++
+     return lsx_rawstartread(ft);
+ }
+ 
+@@ -1441,6 +1610,16 @@
+ 
+         ft->sox_errno = SOX_SUCCESS;
+ 
++        /* MPEG audio: the mp3 handler decodes straight into buf and keeps
++         * its own count of what is left, so there is no numSamples bookkeeping
++         * to do here. */
++        if (wav->mp3_priv) {
++            ft->priv = wav->mp3_priv;
++            done = wav->mp3_handler->read(ft, buf, len);
++            ft->priv = wav;
++            return done;
++        }
++
+         /* If file is in ADPCM encoding then read in multiple blocks else */
+         /* read as much as possible and return quickly. */
+         switch (ft->encoding.encoding)
+@@ -1533,9 +1712,20 @@
+ static int stopread_wav(sox_format_t * ft)
+ {
+     priv_t *       wav = (priv_t *) ft->priv;
++    int            rc = SOX_SUCCESS;
+ 
+     ft->sox_errno = SOX_SUCCESS;
+ 
++    if (wav->mp3_priv) {
++        if (wav->mp3_handler->stopread) {
++            ft->priv = wav->mp3_priv;
++            rc = wav->mp3_handler->stopread(ft);
++            ft->priv = wav;
++        }
++        free(wav->mp3_priv);
++        wav->mp3_priv = NULL;
++    }
++
+     free(wav->packet);
+     free(wav->samples);
+     free(wav->lsx_ms_adpcm_i_coefs);
+@@ -1554,7 +1744,7 @@
+     default:
+         break;
+     }
+-    return SOX_SUCCESS;
++    return rc;
+ }
+ 
+ static int startwrite_wav(sox_format_t * ft)
+@@ -1566,7 +1756,8 @@
+ 
+     if (ft->encoding.encoding != SOX_ENCODING_MS_ADPCM &&
+         ft->encoding.encoding != SOX_ENCODING_IMA_ADPCM &&
+-        ft->encoding.encoding != SOX_ENCODING_GSM)
++        ft->encoding.encoding != SOX_ENCODING_GSM &&
++        ft->encoding.encoding != SOX_ENCODING_MP3)
+     {
+         rc = lsx_rawstartwrite(ft);
+         if (rc)
+@@ -1608,6 +1799,9 @@
+         case WAVE_FORMAT_GSM610:
+             return wavgsminit(ft);
+ 
++        case WAVE_FORMAT_MPEGLAYER3:
++            return startwrite_mpeg_wav(ft);
++
+         default:
+             break;
+     }
+@@ -1777,6 +1971,18 @@
+             wExtSize=2;        /* length of format extension */
+             wSamplesPerBlock = 320;
+             break;
++        case SOX_ENCODING_MP3:
++            if (wChannels > 2)
++            {
++                lsx_fail_errno(ft,SOX_EOF,"channels(%d) must be <= 2",wChannels);
++                return SOX_EOF;
++            }
++            wFormatTag = WAVE_FORMAT_MPEGLAYER3;
++            wBlockAlign = 1;   /* the stream is a byte stream, not blocked */
++            wBitsPerSample = 0;/* not representable as int */
++            wExtSize = 12;     /* MPEGLAYER3WAVEFORMAT */
++            wSamplesPerBlock = 1152;  /* samples in an MPEG-1 layer 3 frame */
++            break;
+         default:
+                 break;
+     }
+@@ -1803,6 +2009,17 @@
+     if (wFormatTag == WAVE_FORMAT_GSM610)
+         if (dwDataLength & 1) dwDataLength++; /* round up to even */
+ 
++    if (wFormatTag == WAVE_FORMAT_MPEGLAYER3) {
++        /* How many bytes the encoder makes of the samples cannot be worked
++         * out from their number, so the length of the data chunk is however
++         * many bytes it actually wrote - and that is only known on the way
++         * out.  On the way in it gets the same "unknown" marker that a
++         * length-less file gets, which is exactly what it is. */
++        dwSamplesWritten = second_header ? wav->numSamples
++                                         : ft->signal.length / wChannels;
++        dwDataLength = second_header ? wav->mp3_dataLength : MS_UNSPEC;
++    }
++
+     if (wFormatTag == WAVE_FORMAT_PCM && (wBitsPerSample > 16 || wChannels > 2)
+         && strcmp(ft->filetype, "wavpcm")) {
+       isExtensible = sox_true;
+@@ -1819,7 +2036,21 @@
+     /* Round before dividing so that txw's 33333.3 doesn't become
+      * 33333 with 66667 byte rate.
+      */
+-    dwAvgBytesPerSec = (wBlockAlign*lrint(ft->signal.rate)) / wSamplesPerBlock;
++    if (wFormatTag == WAVE_FORMAT_MPEGLAYER3) {
++        /* The real rate, once both numbers are known.  Before that, the one
++         * -C asked for, or LAME's default of 128 kbps: a placeholder that is
++         * only left standing when the output can't be seeked back to. */
++        if (second_header && dwSamplesWritten)
++            dwAvgBytesPerSec = (uint32_t)
++                ((double)dwDataLength * ft->signal.rate / dwSamplesWritten + .5);
++        else if (ft->encoding.compression != HUGE_VAL &&
++                 fabs(ft->encoding.compression) >= 0.5)
++            dwAvgBytesPerSec = (uint32_t)(floor(fabs(ft->encoding.compression)) * 125);
++        else
++            dwAvgBytesPerSec = 128 * 125;
++    }
++    else
++        dwAvgBytesPerSec = (wBlockAlign*lrint(ft->signal.rate)) / wSamplesPerBlock;
+ 
+     /* figured out header info, so write it */
+ 
+@@ -1900,6 +2131,21 @@
+         if (lsx_writew(ft, wSamplesPerBlock))
+ 	    write_error();
+         break;
++        case WAVE_FORMAT_MPEGLAYER3:
++        /* MPEGLAYER3WAVEFORMAT.  These five are what ffmpeg and the old ACM
++         * encoders write, down to the two constants at the end: nBlockSize is
++         * given as the samples in a frame rather than its size in bytes, and
++         * nCodecDelay as the 1393 of a 44.1 kHz LAME stream.  Nothing reads
++         * them - our own reader doesn't - and being the odd one out here
++         * would be a worse idea than being wrong in the same way as everyone
++         * else. */
++        if (lsx_writew(ft, 1) ||     /* wID = MPEGLAYER3_ID_MP3 */
++            lsx_writedw(ft, 2) ||    /* fdwFlags = ..._FLAG_PADDING_OFF */
++            lsx_writew(ft, 1152) ||  /* nBlockSize */
++            lsx_writew(ft, 1) ||     /* nFramesPerBlock */
++            lsx_writew(ft, 1393))    /* nCodecDelay */
++	    write_error();
++        break;
+         default:
+         break;
+     }
+@@ -1986,6 +2232,14 @@
+             return len;
+             break;
+ 
++        case WAVE_FORMAT_MPEGLAYER3:
++            ft->priv = wav->mp3_priv;
++            len = wav->mp3_handler->write(ft, buf, len);
++            ft->priv = wav;
++            wav->numSamples += (len/ft->signal.channels);
++            return len;
++            break;
++
+         default:
+             len = lsx_rawwrite(ft, buf, len);
+             wav->numSamples += (len/ft->signal.channels);
+@@ -2012,11 +2266,35 @@
+             if (wavgsmstopwrite(ft))
+ 		return SOX_EOF;
+             break;
++        case WAVE_FORMAT_MPEGLAYER3:
++        {
++            int rc = SOX_SUCCESS;
++
++            if (wav->mp3_handler->stopwrite) {
++                ft->priv = wav->mp3_priv;
++                rc = wav->mp3_handler->stopwrite(ft);
++                ft->priv = wav;
++            }
++            free(wav->mp3_priv);
++            wav->mp3_priv = NULL;
++            if (rc != SOX_SUCCESS)
++                return SOX_EOF;
++            /* stopwrite_lame() rewrites its VBR tag at the start of the data
++             * chunk and leaves us sitting there, so the end of the file is
++             * where the file says it is.  On a pipe there is nothing to seek
++             * and nothing was rewritten, so lsx_tell() is already the end. */
++            if (ft->seekable && lsx_seeki(ft, (off_t)0, SEEK_END))
++                return SOX_EOF;
++            wav->mp3_dataLength = (uint64_t)lsx_tell(ft) - wav->dataStart;
++            break;
++        }
+         }
+ 
+         /* Add a pad byte if the number of data bytes is odd.
+            See wavwritehdr() above for the calculation. */
+-        if (wav->formatTag != WAVE_FORMAT_GSM610)
++        if (wav->formatTag == WAVE_FORMAT_MPEGLAYER3)
++          lsx_padbytes(ft, (size_t)(wav->mp3_dataLength % 2));
++        else if (wav->formatTag != WAVE_FORMAT_GSM610)
+           lsx_padbytes(ft, (size_t)((wav->numSamples + wav->samplesPerBlock - 1)/wav->samplesPerBlock*wav->blockAlign) % 2);
+ 
+         free(wav->packet);
+@@ -2026,11 +2304,23 @@
+         /* All samples are already written out. */
+         /* If file header needs fixing up, for example it needs the */
+         /* the number of samples in a field, seek back and write them here. */
+-        if (ft->signal.length && wav->numSamples <= 0xffffffff && 
++        /* MPEG audio always needs it: the length of the data chunk is not
++           knowable until the encoder has been run. */
++        if (wav->formatTag != WAVE_FORMAT_MPEGLAYER3 &&
++            ft->signal.length && wav->numSamples <= 0xffffffff &&
+             wav->numSamples == ft->signal.length)
+           return SOX_SUCCESS;
+-        if (!ft->seekable)
++        if (!ft->seekable) {
++          /* For MPEG audio down a pipe the three length fields keep the
++           * "unknown" markers they were written with.  That is not a failure:
++           * it is the same thing a reader gets from any piped WAV, and our
++           * own reader takes the length from the file instead. */
++          if (wav->formatTag == WAVE_FORMAT_MPEGLAYER3) {
++            lsx_warn("lengths in the header stay unspecified: can't seek back to fix them");
++            return SOX_SUCCESS;
++          }
+           return SOX_EOF;
++        }
+ 
+         /* When using open_memstream(), seeking back and closing truncates
+          * the buffer to the new offset and fseek(SEEK_END) doesn't work either
+@@ -2109,7 +2399,17 @@
+ {
+   priv_t *   wav = (priv_t *) ft->priv;
+ 
+-  if (ft->encoding.bits_per_sample & 7)
++  if (wav->mp3_priv) {
++    /* seek_mad() finds the frame by counting from ft->data_start */
++    if (!wav->mp3_handler->seek)
++      lsx_fail_errno(ft, SOX_ENOTSUP, "seeking not supported with this encoding");
++    else {
++      ft->priv = wav->mp3_priv;
++      ft->sox_errno = wav->mp3_handler->seek(ft, offset);
++      ft->priv = wav;
++    }
++  }
++  else if (ft->encoding.bits_per_sample & 7)
+     lsx_fail_errno(ft, SOX_ENOTSUP, "seeking not supported with this encoding");
+   else if (wav->formatTag == WAVE_FORMAT_GSM610) {
+     int alignment;
+@@ -2163,3 +2463,36 @@
+   };
+   return &handler;
+ }
++
++/* The same format with the same code behind it, but writing an MP3 stream
++ * into the data chunk instead of samples.  Reading needs no such spelling,
++ * because the fmt chunk says what is in there.
++ *
++ * It has to be a handler of its own rather than one more name in the list
++ * above, because the encodings a handler writes are also what sox_ng.c
++ * consults when it decides whether the output file can simply keep the input
++ * file's encoding.  With MP3 in the wav handler's list, `sox_ng x.mp3 x.wav'
++ * would quietly hand back an MP3 in a RIFF wrapper instead of the PCM the
++ * user asked for.  Here MP3 is the only thing the handler writes, so it is
++ * what gets picked, and nothing else can stumble into it.
++ */
++LSX_FORMAT_HANDLER(wavmp3)
++{
++  static char const * const names[] = {"wavmp3", NULL};
++  static unsigned const write_encodings[] = {
++    SOX_ENCODING_MP3, 0,
++    0};
++  /* The rates MPEG-1 and MPEG-2 layer 3 have, the same list the mp3 handler
++   * gives.  Without it sox_ng would hand LAME a rate it can't encode at and
++   * let it quietly pick a neighbouring one, instead of putting a `rate'
++   * effect in the chain and saying so. */
++  static sox_rate_t const write_rates[] = {
++    8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 0};
++  static sox_format_handler_t const handler = {SOX_LIB_VERSION_CODE,
++    "MPEG audio in a Microsoft RIFF wrapper", names, SOX_FILE_LIT_END,
++    startread_wav, read_samples_wav, stopread_wav,
++    startwrite_wav, write_samples_wav, stopwrite_wav,
++    seek_wav, write_encodings, write_rates, sizeof(priv_t)
++  };
++  return &handler;
++}

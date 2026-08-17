@@ -101,6 +101,21 @@ jobs:
           grep -q "FORMAT(speex)" src/formats.h
           grep -q "SOX_ENCODING_SPEEX" src/sox_ng.h
           grep -q "libsox_ng_la-speex.lo" src/Makefile.in
+          # MP3 i en RIFF-indpakning (fmt-kode 0x0055), som gamle ACM-encodere
+          # og `ffmpeg -c:a libmp3lame -f wav` skriver. Uden patchen siger
+          # sox_ng "file encoding 0x0055 (MP3) is not supported", selv om
+          # libmad er linket med og kunne have afkodet den. Patchen læser dem,
+          # og skriver dem med `-t wavmp3'. Se den lange forklaring i MSYS2-
+          # workflowet; det er de samme seks filer, og det er også dér
+          # røgtesten ligger, for denne exe kan ikke køres her.
+          patch -p1 --fuzz=0 < ../patches/wav-mp3.patch
+          grep -q "startread_mpeg_wav" src/wav.c
+          grep -q "startwrite_mpeg_wav" src/wav.c
+          grep -q "LSX_FORMAT_HANDLER(wavmp3)" src/wav.c
+          grep -q "FORMAT(wavmp3)" src/formats.h
+          grep -q "data_end" src/sox_ng.h
+          grep -q "mad_rewind" src/mp3-mad.c
+          grep -q "lame_seek_to_start" src/mp3-lame.c
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
       # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
@@ -223,6 +238,14 @@ jobs:
             exit 1
           fi
           echo "ok:               Speex-handleren er med"
+          # Samme kontrol for wavmp3-handleren, af samme grund: den er en
+          # LSX_FORMAT_HANDLER for sig, og var FORMAT(wavmp3) ikke kommet med
+          # i formats.h, ville --gc-sections smide den ud uden at sige noget.
+          if ! strings -a src/sox_ng.exe | grep -q "MPEG audio in a Microsoft RIFF wrapper"; then
+            echo "wavmp3-handleren er ikke i exe'en."
+            exit 1
+          fi
+          echo "ok:               wavmp3-handleren er med"
 
       - name: Vis configure-log hvis noget gik galt
         if: failure()
