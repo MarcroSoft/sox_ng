@@ -500,16 +500,43 @@ jobs:
           else
             echo "springer pipe-testen over: stdin-laesning virker ikke her i det hele taget"
           fi
-          # -C er speexenc's kvalitetsskala 0-10. Et helt tal giver konstant
-          # bitrate, et med decimaler slår VBR til.
-          "./src/$EXE" roegtest-16k.wav -c 1 -C 3 lav-q.spx
-          "./src/$EXE" roegtest-16k.wav -c 1 -C 10 hoej-q.spx
-          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 8.5 vbr.spx
-          ls -la lav-q.spx hoej-q.spx vbr.spx
+          # -C er pakket som i opus.c: heltalsdelen er kvaliteten 0-10,
+          # fortegnet vælger CBR eller VBR (negativ er VBR), og decimaldelen
+          # er encoderens complexity 0-10, hvor intet komma betyder 10.
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 3 lav-q.spx
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 10 hoej-q.spx
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C -8 vbr.spx
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 8.3 komp3.spx
+          "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C 8 komp10.spx
+          ls -la lav-q.spx hoej-q.spx vbr.spx komp3.spx komp10.spx
           if [ "$(stat -c%s lav-q.spx)" -ge "$(stat -c%s hoej-q.spx)" ]; then
             echo "-C slår ikke igennem: kvalitet 3 fylder ikke mindre end 10"
             exit 1
           fi
+          # Complexity ændrer kun hvor grundigt encoderen søger, ikke bitraten,
+          # så de to filer skal fylde det samme og alligevel være forskellige.
+          # Var complexity tavst faldet på gulvet, ville de være ens.
+          if [ "$(stat -c%s komp3.spx)" != "$(stat -c%s komp10.spx)" ]; then
+            echo "complexity ændrede bitraten, hvilket den ikke skal"
+            exit 1
+          fi
+          if cmp -s komp3.spx komp10.spx; then
+            echo "-C 8.3 og -C 8 gav samme fil: complexity slår ikke igennem"
+            exit 1
+          fi
+          # Fortegnet skal skifte tilstand; -V3 siger selv hvilken det blev.
+          if ! "./src/$EXE" -V3 roegtest-16k.wav -c 1 -C -8 vbr2.spx 2>&1 |
+               grep -q "VBR"; then
+            echo "-C -8 gav ikke VBR"
+            exit 1
+          fi
+          # Uden for 0-10 skal begge fortegn afvises.
+          for ugyldig in 11 -11; do
+            if "./src/$EXE" roegtest-16k.wav -C $ugyldig ugyldig.spx 2>/dev/null; then
+              echo "-C $ugyldig blev accepteret, men skulle vaere afvist"
+              exit 1
+            fi
+          done
           # MP3 i en RIFF-indpakning, fmt-kode 0x0055. Ingen af de encodere,
           # der er med her, laver sådan en fil, så den bygges i hånden: sox_ng
           # koder lyden til MP3, og resten er ren header. le() skriver et tal

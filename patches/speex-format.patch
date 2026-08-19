@@ -77,7 +77,7 @@
  @am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libsox_ng_la-speexdsp.Tpo $(DEPDIR)/libsox_ng_la-speexdsp.Plo
 --- /dev/null
 +++ b/src/speex.c
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,766 @@
 +/* libSoX Ogg Speex sound format handler
 + *
 + * Copyright 2026 SoX contributors
@@ -115,7 +115,8 @@
 +
 +#define READ_SIZE       4096 /* Bytes handed to libogg at a time */
 +#define MAX_FRAME_BYTES 2000 /* Ceiling speexenc uses for one packet */
-+#define DEFAULT_QUALITY 8    /* speexenc's default as well */
++#define DEFAULT_QUALITY    8 /* speexenc's default as well */
++#define DEFAULT_COMPLEXITY 10 /* opus.c's default; libspeex's own is 2 */
 +
 +typedef struct {
 +  /* Ogg container */
@@ -610,6 +611,7 @@
 +  int packet_size, comments_size, modeID;
 +  int rate = (int)(ft->signal.rate + .5);
 +  double quality = DEFAULT_QUALITY;
++  spx_int32_t complexity = DEFAULT_COMPLEXITY;
 +  int vbr = 0;
 +
 +  if (ft->signal.channels > 2) {
@@ -626,16 +628,30 @@
 +    lsx_warn("Speex is only tuned for 8000, 16000 and 32000 Hz; %d Hz works "
 +             "but may sound poor", rate);
 +
-+  /* -C is speexenc's quality scale.  A whole number asks for constant
-+   * bit rate, anything in between switches the encoder to VBR. */
++  /* -C is packed the same way as in opus.c, so that the two handlers can be
++   * driven alike: the whole part is the quality on speexenc's 0-10 scale,
++   * the sign picks the bit rate mode with negative meaning VBR, and the
++   * fractional part is the encoder's computational complexity, 0-10, where
++   * no fractional part at all means 10.  So -C 8 is quality 8 CBR at full
++   * complexity, -C -8 the same in VBR, and -C 8.3 trades quality for a
++   * faster encode by dropping the complexity to 3.  Complexity 0 needs a
++   * fraction that rounds to nothing, as in -C 8.01.
++   *
++   * signbit() rather than a comparison, so that -C -0 asks for VBR at
++   * quality 0 instead of being swallowed by negative zero comparing equal. */
 +  if (ft->encoding.compression != HUGE_VAL) {
-+    if (ft->encoding.compression < 0 || ft->encoding.compression > 10) {
++    double fraction;
++
++    quality = fabs(trunc(ft->encoding.compression));
++    fraction = fabs(ft->encoding.compression) - quality;
++    if (quality > 10) {
 +      lsx_fail_errno(ft, SOX_EINVAL,
 +                     "compression quality must be between 0 and 10");
 +      return SOX_EOF;
 +    }
-+    quality = ft->encoding.compression;
-+    vbr = quality != floor(quality);
++    complexity = fraction == 0? DEFAULT_COMPLEXITY :
++                                (spx_int32_t)round(fraction * 10);
++    vbr = signbit(ft->encoding.compression);
 +  }
 +
 +  modeID = rate > 25000? SPEEX_MODEID_UWB :
@@ -650,6 +666,7 @@
 +    return SOX_EOF;
 +  }
 +  speex_encoder_ctl(p->st, SPEEX_SET_SAMPLING_RATE, &rate);
++  speex_encoder_ctl(p->st, SPEEX_SET_COMPLEXITY, &complexity);
 +  if (vbr) {
 +    int on = 1;
 +    float q = (float)quality;
@@ -665,8 +682,9 @@
 +  speex_encoder_ctl(p->st, SPEEX_GET_LOOKAHEAD, &p->lookahead);
 +
 +  ft->encoding.encoding = SOX_ENCODING_SPEEX;
-+  lsx_report("%s mode, %d Hz, %d channel(s), quality %g%s", mode->modeName,
-+             rate, p->channels, quality, vbr? " VBR" : "");
++  lsx_report("%s mode, %d Hz, %d channel(s), quality %g %cBR, complexity %d",
++             mode->modeName, rate, p->channels, quality, vbr? 'V' : 'C',
++             (int)complexity);
 +
 +  speex_bits_init(&p->bits);
 +  lsx_vcalloc(p->cbits, (size_t)MAX_FRAME_BYTES);
