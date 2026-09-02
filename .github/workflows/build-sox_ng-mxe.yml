@@ -38,6 +38,14 @@ jobs:
       # check-requirements nedenfor det, længe før det koster tid.
       - name: Forudsætninger
         run: |
+          # ubuntu-24.04-billedet har Microsofts egne apt-kilder med —
+          # azure-cli og packages.microsoft.com/ubuntu/24.04/prod. De svarede
+          # 403 Forbidden 2026-09-02, og `apt-get update' fejler på hele
+          # kørslen, når bare én kilde ikke kan hentes, så trinnet her faldt
+          # på noget, buildet slet ikke bruger. Ingen af MXE's afhængigheder
+          # kommer derfra; de fjernes frem for at blive hentet.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.* \
+                     /etc/apt/sources.list.d/azure-cli.*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake autopoint bash bison bzip2 flex g++ g++-multilib \
