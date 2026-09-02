@@ -80,12 +80,15 @@ jobs:
             "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
           echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
           patch -p1 --fuzz=0 < ../patches/opus-bitrate-range.patch
-          patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
-          # Samme grund som i MSYS2-workflowet: lsx_popen() escaper filnavnet
-          # med backslash, hvilket hverken cmd.exe eller barnets argv-parser
-          # tager som ét argument, så ffmpeg åbner ingenting og pipen er tom.
-          # Rammer m4a, der kun kan læses den vej.
-          patch -p1 --fuzz=0 < ../patches/ffmpeg-quote-filename.patch
+          # win32-glob.c's UTF-8-glob og lsx_popen()'s anførselstegn om
+          # filnavnet er begge landet opstrøms i 14.8.1 — se den længere
+          # forklaring i MSYS2-workflowet. Patchene ville nu fejle med
+          # "Reversed (or previously applied) patch detected!", så her
+          # kontrolleres blot at rettelserne er der. De fejler, hvis version
+          # sættes tilbage til en release uden dem; patchfilerne ligger
+          # stadig i patches/ til det tilfælde.
+          grep -q FindFirstFileW src/win32-glob.c
+          grep -q "cannot contain" src/util.c
           # Native Speex-handler. Uden den kan .spx kun læses, og kun gennem
           # ffmpeg-pipen; med den kan den både læses og skrives af sox_ng
           # selv. Se den lange forklaring i MSYS2-workflowet — det er de samme

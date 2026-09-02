@@ -131,46 +131,39 @@ jobs:
           patch -p1 --fuzz=0 < ../patches/opus-bitrate-range.patch
           grep -q "max_kbps" src/opus.c
 
-      # src/win32-glob.c opremser filer med FindFirstFileA, altså ANSI-udgaven
-      # af Windows-API'et, og får navnene tilbage i systemets ANSI-tegnsæt
-      # (CP1252 på en dansk maskine). Resten af sox_ng regner filnavne for
-      # UTF-8 — det er mingw-w64's CRT, der oversætter både argv og fopen den
-      # vej — så `sox_ng *.flac` fejler med "No such file or directory" på
-      # ethvert navn med æ, ø eller å i. Tegn, som ANSI-tegnsættet slet ikke
-      # har plads til, kommer tilbage som et bogstaveligt '?' og er tabt.
-      # Fejlen går begge veje: et mønster med danske tegn matcher ingenting.
+      # To rettelser, der hidtil kom herfra, ligger i selve 14.8.1 nu, og
+      # patchene fejler derfor med "Reversed (or previously applied) patch
+      # detected!". ChangeLog krediterer dem som:
       #
-      # Patchen skifter til FindFirstFileW og konverterer selv til UTF-8.
-      # Meldt opstrøms? Nej — kun her indtil videre.
-      - name: Ret glob til UTF-8 (win32-glob.c)
+      #   "Quote special characters in Windows file names"
+      #     src/win32-glob.c bruger FindFirstFileW og konverterer selv til
+      #     UTF-8, så `sox_ng *.flac' også finder navne med æ, ø og å.
+      #
+      #   "Quote filename arguments to lsx_popen() to avoid command injection"
+      #     src/util.c sætter anførselstegn om filnavnet i stedet for at
+      #     escape med backslash, så cmd.exe og barnets egen argv-parser er
+      #     enige om, at `med mellemrum.m4a' er ét argument. Uden den fik
+      #     ffmpeg to argumenter for én fil, åbnede ingen af dem og skrev
+      #     intet — hvad sox_ng så som "premature EOF" på m4a.
+      #
+      # Upstream skrev kommentarerne om og lagde en overløbstest oveni, men
+      # koden gør det samme. Patchfilerne bliver liggende i patches/, så en
+      # ældre release stadig kan bygges; kontrollen her fejler netop, hvis
+      # version sættes tilbage til 14.8.0.1, hvor rettelserne mangler.
+      - name: Kontrollér at releasens egne Windows-rettelser er med
         run: |
           cd "$SRC"
-          # --fuzz=0: driver kilden fra hinanden, skal det fejle her og ikke
-          # ende som en patch, der lander et tilfældigt sted.
-          # Relativ sti, ikke $GITHUB_WORKSPACE: den er en Windows-sti med
-          # backslashes, og dem æder bash som escape-tegn.
-          patch -p1 --fuzz=0 < ../patches/win32-glob-utf8.patch
-          grep -q FindFirstFileW src/win32-glob.c
-
-      # lsx_popen() bygger en kommandolinje til cmd.exe, men cmd er ikke den
-      # eneste, der deler den op: bagefter parser barnets eget C-runtime
-      # resten til argv og deler igen på mellemrum, der ikke står i citater.
-      #
-      # 14.8.0.1 escaper med backslash og siger selv i kommentaren "I dunno
-      # about Windows". Målt med et program, der udskriver sin argv:
-      #
-      #   backslash:      argv[2]=[med\]                argv[3]=[mellemrum.m4a]
-      #   caret (main):   argv[2]=[med]                 argv[3]=[mellemrum.m4a]
-      #   anførselstegn:  argv[2]=[med mellemrum.m4a]
-      #
-      # ffmpeg får altså to argumenter for én fil, åbner ingen af dem og
-      # skriver intet — hvad sox_ng ser som "premature EOF". Det rammer m4a,
-      # som kun kan læses gennem ffmpeg-pipen.
-      - name: Sæt anførselstegn om filnavnet til ffmpeg (util.c)
-        run: |
-          cd "$SRC"
-          patch -p1 --fuzz=0 < ../patches/ffmpeg-quote-filename.patch
-          grep -q "cannot contain" src/util.c
+          if ! grep -q FindFirstFileW src/win32-glob.c; then
+            echo "src/win32-glob.c bruger ikke FindFirstFileW: glob er ANSI igen."
+            echo "Byg 14.8.1 eller nyere, eller læg patches/win32-glob-utf8.patch ind igen."
+            exit 1
+          fi
+          if ! grep -q "cannot contain" src/util.c; then
+            echo "src/util.c sætter ikke anførselstegn om filnavnet til ffmpeg."
+            echo "Byg 14.8.1 eller nyere, eller læg patches/ffmpeg-quote-filename.patch ind igen."
+            exit 1
+          fi
+          echo "ok: glob er UTF-8, og lsx_popen citerer filnavnet"
 
       # speex og speexdsp er to forskellige biblioteker med næsten samme navn.
       # sox_ng har altid brugt speexdsp — det er preprocessoren bag -agc,
