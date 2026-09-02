@@ -17,7 +17,7 @@ on:
     inputs:
       version:
         description: "sox_ng-version fra Codeberg-releases"
-        default: "14.8.0.1"
+        default: "14.8.1"
 
 env:
   MXE_COMMIT: 98d61fc1fe02dc804320f53804d5231f4a98b6ce
