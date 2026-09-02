@@ -119,6 +119,12 @@ jobs:
           grep -q "data_end" src/sox_ng.h
           grep -q "mad_rewind" src/mp3-mad.c
           grep -q "lame_seek_to_start" src/mp3-lame.c
+          # 14.8.1 lagde et POSIX sleep(1) ind i src/waveaudio.c, som kun
+          # bygges på Windows og hvor intet erklærer den. GCC 14 og nyere
+          # gør det til en fejl. Se den længere forklaring i MSYS2-
+          # workflowet; patchen bytter det til Win32's Sleep(1000).
+          patch -p1 --fuzz=0 < ../patches/waveaudio-sleep.patch
+          grep -q "Sleep(1000)" src/waveaudio.c
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
       # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:

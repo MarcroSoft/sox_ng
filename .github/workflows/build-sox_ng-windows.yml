@@ -261,6 +261,28 @@ jobs:
           grep -q "mad_rewind" src/mp3-mad.c
           grep -q "lame_seek_to_start" src/mp3-lame.c
 
+      # 14.8.1's egen rettelse "waveaudio: Pause before shutting down so audio
+      # is not truncated" lagde et sleep(1) ind i src/waveaudio.c, lige før
+      # waveOutReset(). Meningen er god nok — uden pausen klipper MME de
+      # sidste brøkdele af et sekund af — men sleep() er POSIX, og filen her
+      # bygges kun på Windows, hvor hverken windows.h, mmsystem.h eller
+      # sox_i.h erklærer den. GCC 14 og nyere gør en implicit erklæring til en
+      # fejl frem for en advarsel, så MSYS2-buildet stopper med:
+      #
+      #   waveaudio.c:101:5: error: implicit declaration of function 'sleep';
+      #   did you mean 'Sleep'?
+      #
+      # Patchen svarer ja tak til compilerens forslag: Win32's Sleep() regner
+      # i millisekunder, så sleep(1) bliver Sleep(1000), og pausen er præcis
+      # den samme.
+      #
+      # Meldt opstrøms? Nej — kun her indtil videre.
+      - name: Byt POSIX sleep() ud med Win32 Sleep() (waveaudio.c)
+        run: |
+          cd "$SRC"
+          patch -p1 --fuzz=0 < ../patches/waveaudio-sleep.patch
+          grep -q "Sleep(1000)" src/waveaudio.c
+
       # configure bygger OPUS_LIBS op som "-lopus -lopusfile". Ved dynamisk link
       # er rækkefølgen ligegyldig, men statisk skal libopusfile stå før libopus:
       # ld scanner arkiverne fra venstre mod højre, og når libopusfile.a først er
