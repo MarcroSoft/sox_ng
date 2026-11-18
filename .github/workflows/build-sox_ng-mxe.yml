@@ -131,11 +131,16 @@ jobs:
       # Fire rettelser, der hidtil kom herfra, ligger i selve releasen nu.
       # Patchene ville fejle med "Reversed (or previously applied) patch
       # detected!" eller slet ikke finde deres kontekst, så i stedet
-      # kontrolleres her, at koden er der. Patchfilerne bliver liggende i
-      # patches/ som dokumentation af hvad der blev rettet — men bemærk, at
-      # version ikke længere bare kan sættes tilbage: 14.9.0 har ombrudt
-      # src/formats.c fra mellemrum til tabulatorer, så speex-patchens
-      # formats.c-hunks kun passer på 14.9.0 og nyere.
+      # kontrolleres her, at koden er der.
+      #
+      # De fire patchfiler er slettet igen; de lå i patches/ til og med
+      # 3102faa og kan hentes derfra med `git show'. De blev liggende et
+      # stykke tid med den tanke, at en ældre release så stadig kunne
+      # bygges — men det kan den ikke: 14.9.0 har ombrudt src/formats.c fra
+      # mellemrum til tabulatorer, så speex-patchens formats.c-hunks kun
+      # passer på 14.9.0 og nyere. Dermed var de fire filer ikke
+      # dokumentation, men vildspor. Hvad hver rettelse gjorde, står her i
+      # stedet.
       #
       # 14.8.1 tog de to første. ChangeLog krediterer dem som:
       #
@@ -159,7 +164,7 @@ jobs:
       #     HAVE_OPUSENC — men tavst, så selve resultatet kontrolleres efter
       #     configure, ikke her.
       #
-      #   Opus' bitrate-interval. patches/opus-bitrate-range.patch udvidede
+      #   Opus' bitrate-interval. En patch herfra udvidede
       #     sox_ng's egen husregel på 6-256 kbps til opusencs interval: 1 kbps
       #     i bund og 1024 kbps per kanal i top. 14.9.0's src/opus.c er byte
       #     for byte den backportede fil plus netop den patch, så begge trin
@@ -167,8 +172,8 @@ jobs:
       #
       # Og endelig waveaudio: 14.8.1 lagde et POSIX sleep(1) ind i
       # src/waveaudio.c, som kun bygges på Windows og hvor intet erklærer
-      # den — GCC 14 og nyere gør det til en fejl, og
-      # patches/waveaudio-sleep.patch byttede det til Win32's Sleep(1000).
+      # den — GCC 14 og nyere gør det til en fejl, og en patch herfra
+      # byttede det til Win32's Sleep(1000).
       # 14.9.0 har skrevet hele stedet om til en rigtig drain_output(), der
       # venter på waveOut-bufferne med WaitForSingleObject i stedet for at
       # sove et sekund og håbe. Patchen er dermed både unødvendig og
@@ -255,13 +260,26 @@ jobs:
           wget -q "https://codeberg.org/sox_ng/sox_ng/releases/download/sox_ng-$V/sox_ng-$V.tar.gz"
           tar xzf "sox_ng-$V.tar.gz"
           cd "sox_ng-$V"
-          grep -q FindFirstFileW src/win32-glob.c
-          grep -q "cannot contain" src/util.c
-          grep -q HAVE_OPUSENC configure
-          grep -q "max_kbps" src/opus.c
-          if grep -qF "sleep(1)" src/waveaudio.c; then
-            echo "src/waveaudio.c kalder POSIX sleep(): GCC 14 afviser det."
-            echo "Byg 14.9.0 eller nyere, eller læg patches/waveaudio-sleep.patch ind igen."
+          # Alle fem siger hvad der mangler, og hvad man skal gøre. En bar
+          # `grep -q' ville dø tavst, og nu patchene er slettet, er der
+          # ingen fil i træet at gætte sig til svaret fra.
+          mangler=""
+          siger() { echo "  $1"; mangler="ja"; }
+          grep -q FindFirstFileW src/win32-glob.c ||
+            siger "src/win32-glob.c bruger ikke FindFirstFileW: glob er ANSI igen (kom i 14.8.1)."
+          grep -q "cannot contain" src/util.c ||
+            siger "src/util.c citerer ikke filnavnet til ffmpeg (kom i 14.8.1)."
+          grep -q HAVE_OPUSENC configure ||
+            siger "configure leder ikke efter libopusenc: .opus kan kun læses (kom i 14.9.0)."
+          grep -q "max_kbps" src/opus.c ||
+            siger "src/opus.c har ikke det udvidede bitrate-interval (kom i 14.9.0)."
+          ! grep -qF "sleep(1)" src/waveaudio.c ||
+            siger "src/waveaudio.c kalder POSIX sleep(), som GCC 14 afviser (rettet i 14.9.0)."
+          if [ -n "$mangler" ]; then
+            echo "Byg 14.9.0 eller nyere. Vil du absolut bygge en ældre release,"
+            echo "ligger de patches, der retter ovenstående, i git-historikken"
+            echo "til og med 3102faa — men speex-patchen passer kun på 14.9.0+,"
+            echo "så den skal genereres om."
             exit 1
           fi
           echo "ok: glob, lsx_popen, opus-encoding, bitrate-interval og waveaudio"
@@ -552,9 +570,8 @@ jobs:
           "$SOX" test.opus test-rundtur.wav
           ls -la test-rundtur.wav
           # 1 kbps: under sox_ng's eget gamle gulv på 6, og dermed beviset på
-          # at det udvidede interval er med — det kom fra
-          # patches/opus-bitrate-range.patch indtil 14.8.1, og ligger i selve
-          # src/opus.c fra 14.9.0. -V3 viser hvad encoderen fik at vide.
+          # at det udvidede interval er med — det kom fra en patch her
+          # indtil 14.8.1, og ligger i selve src/opus.c fra 14.9.0. -V3 viser hvad encoderen fik at vide.
           "$SOX" -V3 test.wav -C -1 -r 48000 lav.opus
           ls -la lav.opus
           "$SOXI" lav.opus
