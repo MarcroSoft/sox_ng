@@ -5,3 +5,8 @@
 # CRLF-udgave ville aldrig kunne matche kontekstlinjerne — og buildet kører på
 # en Windows-runner, hvor text=auto ellers ville lave netop den om.
 patches/*.patch -text
+
+# Roegtesten koeres af Git Bash paa en Windows-runner, hvor et CRLF ville
+# lande midt i variabler og vaelte den. Hold skalscripts paa LF, uanset hvad
+# core.autocrlf siger paa maskinen.
+*.sh text eol=lf
