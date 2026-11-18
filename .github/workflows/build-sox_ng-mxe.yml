@@ -590,6 +590,46 @@ jobs:
             echo "Speex-rundturen tabte eller tilføjede samples"
             exit 1
           fi
+          # Og så justeringen, som antallet af samples ikke siger noget om.
+          # Speex er tabsgivende, så lyden kommer ikke ens tilbage — men den
+          # skal komme tilbage på rette tid. Testen er derfor ikke en
+          # tærskel, men en sammenligning: passer en forskydning bedre end
+          # ingen forskydning, er afkodningen tidsforskudt.
+          #
+          # Hvidstøj med vilje. En tone gentager sig — 440 Hz ved 16 kHz hver
+          # 36. sample — og passer derfor lige godt ved en hel række
+          # forskydninger, så en tone kan slet ikke måle det her. Det var
+          # netop den fælde, der i første omgang fik en forskydning på 223
+          # samples til at se ud som 40.
+          #
+          # 223 er med i rækken, fordi det er den fejl, handleren havde:
+          # encoderens 143 plus decoderens 80 i wideband-tilstand.
+          "$SOX" -n -r 16000 -c 1 just.wav synth 1 whitenoise vol 0.5
+          "$SOX" just.wav just.spx
+          "$SOX" just.spx just-ud.wav
+          "$SOX" just.wav just-klip.wav trim 0 15000s
+          rms() {  # rms <forskydning i samples>
+            "$SOX" just-ud.wav skubbet.wav trim "$1"s 15000s 2>/dev/null
+            "$SOX" -m just-klip.wav -v -1 skubbet.wav forskel.wav 2>/dev/null
+            "$SOX" forskel.wav -n stat 2>&1 | sed -n 's/^RMS *amplitude: *//p'
+          }
+          r0=$(rms 0)
+          echo "RMS-forskel uden forskydning: $r0"
+          # 0.9-margenen er mod numerisk vippen: to forskydninger, der begge
+          # er forkerte, lander på omtrent samme RMS, og så kan den ene godt
+          # komme et par promille under den anden uden at betyde noget. En
+          # rigtig fejljustering er ikke i nærheden af marginal — målt på den
+          # fejl, der var her, var 223 samples 0.086 mod 0.216.
+          for k in 64 128 223 256; do
+            rk=$(rms "$k")
+            echo "  forskudt $k samples: $rk"
+            if awk "BEGIN{exit !($rk < 0.9 * $r0)}"; then
+              echo "Speex-afkodningen er tidsforskudt: $k samples passer"
+              echo "klart bedre end ingen forskydning ($rk mod $r0)."
+              exit 1
+            fi
+          done
+          echo "ok: Speex-rundturen er paa rette tid"
           # Fra en pipe er filen ikke søgbar, så handleren kan hverken læse
           # sidste sides granulepos på forhånd eller spole tilbage. Først
           # kontrolleres at pipe-læsning overhovedet virker i dette miljø —

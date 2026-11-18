@@ -77,7 +77,7 @@
  @am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libsox_ng_la-speexdsp.Tpo $(DEPDIR)/libsox_ng_la-speexdsp.Plo
 --- /dev/null
 +++ b/src/speex.c
-@@ -0,0 +1,766 @@
+@@ -0,0 +1,803 @@
 +/* libSoX Ogg Speex sound format handler
 + *
 + * Copyright 2026 SoX contributors
@@ -137,12 +137,11 @@
 +  spx_int16_t    * frame;         /* Decoded frame, interleaved */
 +  size_t           frame_pos;     /* Next sample to hand out */
 +  size_t           frame_len;     /* Samples in frame that are ours to keep */
-+  int              frame_index;   /* Frame number within the current packet */
 +  int              frames_left;   /* Frames still coded in the current packet */
-+  int              packet_no;     /* Packet number within the current page */
-+  int              page_packets;
-+  int              skip_samples;
-+  ogg_int64_t      last_granule;
++  int              front_skip;    /* Codec delay to drop at the start */
++  ogg_int64_t      decoded;       /* Samples per channel the decoder has made */
++  ogg_int64_t      emitted;       /* Samples per channel handed out */
++  ogg_int64_t      eos_granule;   /* Granule of the last page, -1 until seen */
 +  int              eos;
 +
 +  /* Writing */
@@ -176,29 +175,20 @@
 +  return 1;
 +}
 +
-+/* Feed one page to the stream layer and work out, from its granule position,
-+ * how many samples of the packets ending on it are padding.  A positive
-+ * skip_samples means padding at the front, negative means at the back. */
++/* Feed one page to the stream layer.  The only thing we want from the page
++ * itself is the granule position of the last one: that is where the audio
++ * ends.  See the long comment at decode_frame() for why that is enough. */
 +static void page_in(sox_format_t * ft, ogg_page * og)
 +{
 +  priv_t * p = (priv_t *)ft->priv;
-+  ogg_int64_t granule;
 +
 +  ogg_stream_pagein(&p->os, og);
-+  granule = ogg_page_granulepos(og);
-+  p->page_packets = ogg_page_packets(og);
-+  p->packet_no = 0;
++  if (ogg_page_eos(og)) {
++    ogg_int64_t granule = ogg_page_granulepos(og);
 +
-+  if (granule > 0 && p->frame_size) {
-+    p->skip_samples = (int)((ogg_int64_t)p->frame_size *
-+        ((ogg_int64_t)p->page_packets * p->nframes) -
-+        (granule - p->last_granule));
-+    if (ogg_page_eos(og))
-+      p->skip_samples = -p->skip_samples;
-+  } else
-+    p->skip_samples = 0;
-+
-+  p->last_granule = granule;
++    if (granule > 0)
++      p->eos_granule = granule;
++  }
 +}
 +
 +/* Next packet of the Speex stream, headers included.  Returns 0 at the end. */
@@ -212,7 +202,6 @@
 +      int r = ogg_stream_packetout(&p->os, op);
 +
 +      if (r == 1) {
-+        ++p->packet_no;
 +        if (op->e_o_s)
 +          p->eos = 1;
 +        return 1;
@@ -330,7 +319,8 @@
 +  spx_int32_t enh = 1;
 +
 +  ogg_sync_init(&p->oy);
-+  p->last_granule = 0;
++  p->eos_granule = -1;
++  p->decoded = p->emitted = 0;
 +
 +  /* The Speex logical stream is the one whose first packet says so; skip
 +   * anything else that may be multiplexed in, such as an Ogg Skeleton.  The
@@ -384,6 +374,41 @@
 +  speex_decoder_ctl(p->st, SPEEX_SET_ENH, &enh);
 +  speex_decoder_ctl(p->st, SPEEX_GET_FRAME_SIZE, &p->frame_size);
 +  speex_decoder_ctl(p->st, SPEEX_GET_LOOKAHEAD, &p->lookahead);
++
++  /* How much of the decoder's output comes before the first real sample.
++   *
++   * Two delays add up.  The encoder's, because it subtracted its own
++   * lookahead when it wrote the granule positions -- speexenc does
++   *
++   *   op.granulepos = (id + 1) * frame_size - lookahead;
++   *
++   * and so does startwrite_speex below -- and the decoder's own, which it
++   * reports through SPEEX_GET_LOOKAHEAD.  For wideband at 16 kHz that is
++   * 143 + 80 = 223 samples.
++   *
++   * The encoder's figure is not in the stream anywhere: Speex has no
++   * pre-skip field the way Opus does.  It is fixed per mode, though, so we
++   * ask libspeex by standing up a throwaway encoder for the same mode and
++   * reading the number straight out of it.  That beats hard-coding a formula
++   * that has already changed once between libspeex releases.
++   *
++   * The one case this cannot get right is a file from `speexenc --denoise'
++   * or `--agc': those add another frame_size of lookahead, and nothing in
++   * the stream says so.  Files written by this handler never do. */
++  {
++    void * enc = speex_encoder_init(mode);
++
++    p->front_skip = (int)p->lookahead;
++    if (enc) {
++      spx_int32_t enc_lookahead = 0;
++
++      speex_encoder_ctl(enc, SPEEX_GET_LOOKAHEAD, &enc_lookahead);
++      p->front_skip += (int)enc_lookahead;
++      speex_encoder_destroy(enc);
++    } else
++      lsx_warn("cannot measure the encoder delay; "
++               "the first %d samples may be codec startup", p->front_skip);
++  }
 +
 +  p->channels = header->nb_channels < 2? 1 : 2;
 +  p->nframes = header->frames_per_packet > 0? (int)header->frames_per_packet : 1;
@@ -459,28 +484,41 @@
 +      if (p->channels == 2)
 +        speex_decode_stereo_int(p->frame, p->frame_size, &p->stereo);
 +
-+      /* Drop the encoder's lookahead at the start of the stream and the zero
-+       * padding of the last frame, both of which the granule positions of the
-+       * pages spell out. */
-+      if (p->packet_no == 1 && p->frame_index == 0 && p->skip_samples > 0) {
-+        offset = p->skip_samples + p->lookahead;
++      /* Two things have to go: the codec's delay at the front, and the
++       * encoder's zero padding of the last frame at the back.
++       *
++       * The front is p->front_skip, worked out once in startread.  The back
++       * needs no arithmetic of its own: the granule position of the
++       * end-of-stream page is the number of samples the stream holds, so we
++       * simply stop handing out samples when we have handed out that many.
++       *
++       * The obvious thing -- and what speexdec does, and what this handler
++       * used to do -- is to read each page's granule position and work out
++       * the padding of the packets that end on it.  That falls apart when the
++       * first audio page is also the last one, which is every Speex file
++       * shorter than about five seconds: one number then has to express both
++       * the front delay and the back padding, and it can only be one of them.
++       * speexdec gets the front trim wrong in exactly that case, and this
++       * handler inherited the bug -- a short .spx came out 223 samples late
++       * at 16 kHz, with 5 ms of extra audio on the end. */
++      if (p->decoded < p->front_skip) {
++        offset = (int)(p->front_skip - p->decoded);
++        if (offset > p->frame_size)
++          offset = p->frame_size;
 +        length = p->frame_size - offset;
 +      }
-+      if (p->packet_no == p->page_packets && p->skip_samples < 0) {
-+        int packet_length = p->nframes * p->frame_size + p->skip_samples +
-+                            p->lookahead;
-+        length = packet_length - p->frame_index * p->frame_size;
-+      }
-+      if (offset < 0)
-+        offset = 0;
-+      if (offset > p->frame_size)
-+        offset = p->frame_size;
-+      if (length < 0)
-+        length = 0;
-+      if (length > p->frame_size - offset)
-+        length = p->frame_size - offset;
++      p->decoded += p->frame_size;
 +
-+      ++p->frame_index;
++      if (p->eos_granule >= 0) {
++        ogg_int64_t room = p->eos_granule - p->emitted;
++
++        if (room < 0)
++          room = 0;
++        if (length > room)
++          length = (int)room;
++      }
++      p->emitted += length;
++
 +      p->frame_pos = (size_t)offset * p->channels;
 +      p->frame_len = (size_t)(offset + length) * p->channels;
 +      if (p->frame_len > p->frame_pos)
@@ -492,7 +530,6 @@
 +      return 0;
 +    speex_bits_read_from(&p->bits, (char *)op.packet, (int)op.bytes);
 +    p->frames_left = p->nframes;
-+    p->frame_index = 0;
 +  }
 +}
 +
