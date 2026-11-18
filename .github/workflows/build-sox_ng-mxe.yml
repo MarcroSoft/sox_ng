@@ -2,12 +2,25 @@ name: sox_ng krydsbygget med MXE
 
 # MXE (M cross environment) bygger krydstoolchainen og hvert eneste bibliotek
 # fra kilde på Linux. Det er den vej sox_ng's egen vedligeholder laver sine
-# Windows-exe'er. Prisen er timer, hvor MSYS2-buildet tager minutter; til
-# gengæld er hele træet pinnet og reproducerbart, og pakkerne er nye — MXE's
-# færdigbyggede apt-pakker er sidst rørt i januar 2021 og kan ikke bruges.
+# Windows-exe'er, og siden 2026-11-18 den eneste vej her.
 #
-# Første kørsel bygger alt. Bagefter ligger mxe/usr i cachen, og senere
-# kørsler tager minutter, så længe MXE_COMMIT står stille.
+# Der lå før et MSYS2-build ved siden af, som tog fem minutter mod MXE's 25-35.
+# Det er væk, og grunden er værd at kende, hvis nogen vil have det tilbage:
+# MSYS2 meldte 2026-03-15, at MINGW64-miljøet udfases, fordi støtten til
+# Windows 8.1 er slut og UCRT dermed kan tages for givet. Ingen nye pakker, og
+# leaf-pakker kan blive fjernet. 2026-11-18 var `mingw-w64-x86_64-twolame' og
+# `mingw-w64-x86_64-libid3tag' forsvundet ud af mingw64-databasen, og buildet
+# faldt i pacman-trinnet. Begge findes i ucrt64, men så bygger man mod UCRT og
+# ikke msvcrt, og mingw32 er i forvejen skrumpet til 83 pakker uden ét codec,
+# så 32 bit kunne slet ikke laves den vej.
+#
+# MXE har ingen af de problemer: alt bygges fra kilde, mingw-w64 14.0.0 uden
+# --with-default-msvcrt (altså msvcrt), og begge tripletter — i686 og x86_64 —
+# er førsteklasses mål. Derfor matricen nedenfor.
+#
+# Prisen er tid. Til gengæld er hele træet pinnet og reproducerbart, og
+# pakkerne er nye — MXE's færdigbyggede apt-pakker er sidst rørt i januar 2021
+# og kan ikke bruges.
 #
 # Rækkefølgen er med vilje: alt der kan fejle hurtigt — apt, patches, MXE's
 # egen kravkontrol — ligger før det lange build.
@@ -18,15 +31,32 @@ on:
       version:
         description: "sox_ng-version fra Codeberg-releases"
         default: "14.9.0"
+      replace:
+        description: "Byg som sox.exe i stedet for sox_ng.exe"
+        type: boolean
+        default: false
 
 env:
   MXE_COMMIT: 98d61fc1fe02dc804320f53804d5231f4a98b6ce
-  MXE_TARGET: x86_64-w64-mingw32.static
 
 jobs:
   mxe:
     runs-on: ubuntu-latest
     timeout-minutes: 350   # jobgrænsen hos GitHub er 360
+
+    # fail-fast: false, fordi de to arkitekturer er uafhængige. Vælter i686,
+    # skal x86_64 stadig blive færdig og kunne hentes.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: win32
+            target: i686-w64-mingw32.static
+          - arch: win64
+            target: x86_64-w64-mingw32.static
+
+    env:
+      MXE_TARGET: ${{ matrix.target }}
 
     steps:
       - name: Hent dette repo (patches/)
@@ -36,6 +66,9 @@ jobs:
       # docs. libclang-dev er udeladt: den fylder omkring en gigabyte og
       # bruges kun af pakker, vi ikke bygger. Mangler der noget, siger
       # check-requirements nedenfor det, længe før det koster tid.
+      #
+      # g++-multilib og libc6-dev-i386 er ikke pynt: de skal være der, for at
+      # i686-toolchainen kan bygges på en 64-bit vært.
       - name: Forudsætninger
         run: |
           # ubuntu-24.04-billedet har Microsofts egne apt-kilder med —
@@ -76,36 +109,147 @@ jobs:
           grep -E "_VERSION|_CHECKSUM" mxe/src/libopusenc.mk
 
       # Ligger før det lange build med vilje: fejler en patch, koster det et
-      # minut at opdage i stedet for to timer.
+      # minut at opdage i stedet for en halv time.
+      #
+      # ---- Hvad releasen selv har med ----
+      #
+      # Fire rettelser, der hidtil kom herfra, ligger i selve releasen nu.
+      # Patchene ville fejle med "Reversed (or previously applied) patch
+      # detected!" eller slet ikke finde deres kontekst, så i stedet
+      # kontrolleres her, at koden er der. Patchfilerne bliver liggende i
+      # patches/ som dokumentation af hvad der blev rettet — men bemærk, at
+      # version ikke længere bare kan sættes tilbage: 14.9.0 har ombrudt
+      # src/formats.c fra mellemrum til tabulatorer, så speex-patchens
+      # formats.c-hunks kun passer på 14.9.0 og nyere.
+      #
+      # 14.8.1 tog de to første. ChangeLog krediterer dem som:
+      #
+      #   "Quote special characters in Windows file names"
+      #     src/win32-glob.c bruger FindFirstFileW og konverterer selv til
+      #     UTF-8, så `sox_ng *.flac' også finder navne med æ, ø og å.
+      #
+      #   "Quote filename arguments to lsx_popen() to avoid command injection"
+      #     src/util.c sætter anførselstegn om filnavnet i stedet for at
+      #     escape med backslash, så cmd.exe og barnets egen argv-parser er
+      #     enige om, at `med mellemrum.m4a' er ét argument. Uden den fik
+      #     ffmpeg to argumenter for én fil, åbnede ingen af dem og skrev
+      #     intet — hvad sox_ng så som "premature EOF" på m4a.
+      #
+      # 14.9.0 tog de to næste:
+      #
+      #   Opus-encoding. Indtil 14.8.1 stod der NULL i handlerens tre
+      #     skrive-slots, så .opus kun kunne læses, og workflowet hentede
+      #     src/opus.c fra main og tændte encoderen med -DHAVE_OPUSENC i
+      #     CPPFLAGS. Nu leder configure selv efter libopusenc og definerer
+      #     HAVE_OPUSENC — men tavst, så selve resultatet kontrolleres efter
+      #     configure, ikke her.
+      #
+      #   Opus' bitrate-interval. patches/opus-bitrate-range.patch udvidede
+      #     sox_ng's egen husregel på 6-256 kbps til opusencs interval: 1 kbps
+      #     i bund og 1024 kbps per kanal i top. 14.9.0's src/opus.c er byte
+      #     for byte den backportede fil plus netop den patch, så begge trin
+      #     er faldet bort på én gang.
+      #
+      # Og endelig waveaudio: 14.8.1 lagde et POSIX sleep(1) ind i
+      # src/waveaudio.c, som kun bygges på Windows og hvor intet erklærer
+      # den — GCC 14 og nyere gør det til en fejl, og
+      # patches/waveaudio-sleep.patch byttede det til Win32's Sleep(1000).
+      # 14.9.0 har skrevet hele stedet om til en rigtig drain_output(), der
+      # venter på waveOut-bufferne med WaitForSingleObject i stedet for at
+      # sove et sekund og håbe. Patchen er dermed både unødvendig og
+      # uanvendelig: dens kontekst findes ikke længere.
+      #
+      # ---- Native Speex-handler ----
+      #
+      # speex og speexdsp er to forskellige biblioteker med næsten samme navn.
+      # sox_ng har altid brugt speexdsp — det er preprocessoren bag -agc,
+      # -denoise og -dereverb — men aldrig selve codec'et. .spx kunne derfor
+      # kun læses, og kun gennem ffmpeg-pipen, fordi ffmpeg-handleren i
+      # src/ffmpeg.c melder sig på "spx" og "speex" uden at kunne skrive.
+      #
+      # Patchen lægger en rigtig src/speex.c ind: libogg til containeren,
+      # libspeex til codec'et, læsning og skrivning. Den registreres i
+      # formats.h før ffmpeg-blokken, så det er den native handler der findes,
+      # når endelsen slås op — sox_find_format tager den første der matcher.
+      # Dermed kan .spx læses uden en ffmpeg.exe i PATH, og skrives.
+      #
+      # Fem filer hænger sammen og skal alle med, ellers linker det ikke:
+      #   src/speex.c      selve handleren
+      #   src/formats.h    FORMAT(speex) bag #if HAVE_SPEEX
+      #   src/sox_ng.h     SOX_ENCODING_SPEEX sidst i sox_encoding_t, plus
+      #   src/formats.c    den matchende række i s_sox_encodings_info[] —
+      #                    et assert_static tæller dem og fejler ellers
+      #   src/Makefile.in  objektet og dets oversættelsesregel
+      #
+      # Makefile.in og ikke Makefile.am med vilje: releasen har allerede
+      # kørt automake, og rører man .am-filen, bliver den nyere end .in-filen,
+      # hvorefter Makefilens egen vedligeholdsregel prøver at køre automake om
+      # på et udgivet træ. Reglen her skriver ingen .Plo-afhængighedsfil, så
+      # den behøver heller ikke am--depfiles-maskineriet.
+      #
+      # configure.ac røres slet ikke; HAVE_SPEEX kommer fra CPPFLAGS nedenfor.
+      # Får en senere sox_ng-udgave selv en speex-handler, fejler patchen her
+      # frem for at overskrive den.
+      #
+      # ---- MP3 i en RIFF-indpakning ----
+      #
+      # En .wav-fil behøver ikke indeholde PCM. Formatkoden 0x0055 i fmt-
+      # chunken betyder, at data-chunken er en almindelig MP3-strøm med en
+      # RIFF-indpakning udenom — det er sådan gamle ACM-encodere, Windows'
+      # egen lydoptager og `ffmpeg -c:a libmp3lame -f wav` skriver MP3. Indtil
+      # nu sagde sox_ng bare:
+      #
+      #   file encoding 0x0055 (MP3) is not supported
+      #
+      # og libmad lå lige ved siden af og kunne have afkodet den.
+      #
+      # Patchen lader wav.c hente mp3-handleren med sox_find_format("mp3") og
+      # give den arbejdet — begge veje. Seks filer:
+      #   src/wav.c        genkender 0x0055 og 0x0050 (MP1/MP2) ved læsning og
+      #                    skriver dem med `-t wavmp3'. Skifter ft->priv ud
+      #                    omkring hvert kald ind i mp3-handleren, som ellers
+      #                    ville skrive oven i wav'ens egne felter
+      #   src/formats.h    FORMAT(wavmp3)
+      #   src/mp3-mad.c    spoler tilbage til ft->data_start i stedet for til
+      #                    filens begyndelse — ellers lander den i RIFF-
+      #                    headeren, både når varigheden skal måles og ved
+      #                    `trim'
+      #   src/mp3-lame.c   det samme den anden vej: LAME spoler tilbage til
+      #                    starten af MPEG-strømmen for at skrive sin Xing-
+      #                    ramme, og uden data_start rammer den RIFF-headeren
+      #   src/formats_i.c  lsx_readbuf() standser ved ft->data_end
+      #   src/sox_ng.h     selve feltet data_end
+      #
+      # data_end er ikke pynt: uden den læser libmad videre forbi data-chunken
+      # ind i en efterfølgende LIST- eller id3-chunk, og starter den tilfældigt
+      # med to bytes, der ligner et MPEG-sync-ord, kommer der en ekstra ramme
+      # støj ud. Målt: 133632 samples i stedet for 132480.
+      #
+      # Skrivning er en handler for sig, `wavmp3', og ikke bare et navn mere
+      # på wav-handleren. Grunden står i wav.c: listen over encodings en
+      # handler kan skrive er også den, sox_ng.c slår op i, når den afgør, om
+      # outputfilen bare kan beholde inputfilens encoding. Stod MP3 på
+      # wav-handlerens liste, ville `sox_ng x.mp3 x.wav' stille og roligt
+      # aflevere en MP3 i en RIFF-indpakning i stedet for den PCM, man bad om.
+      # Røgtest-jobbet holder øje med netop det.
+      #
+      # Meldt opstrøms? Nej — kun her indtil videre.
       - name: Hent og lap sox_ng
         run: |
           V="${{ github.event.inputs.version }}"
           wget -q "https://codeberg.org/sox_ng/sox_ng/releases/download/sox_ng-$V/sox_ng-$V.tar.gz"
           tar xzf "sox_ng-$V.tar.gz"
           cd "sox_ng-$V"
-          # Fire rettelser, der hidtil kom herfra, ligger i selve releasen nu
-          # — se den længere forklaring i MSYS2-workflowet. Patchene ville
-          # fejle med "Reversed (or previously applied) patch detected!" eller
-          # slet ikke finde deres kontekst, så her kontrolleres blot, at koden
-          # er der. Patchfilerne bliver liggende i patches/, men version kan
-          # ikke bare sættes tilbage: speex-patchens formats.c-hunks passer kun
-          # på 14.9.0's ombrudte fil.
-          #
-          # 14.8.1 tog win32-glob.c's UTF-8-glob og lsx_popen()'s
-          # anførselstegn om filnavnet. 14.9.0 tog opus-encoderen og det
-          # udvidede bitrate-interval: dens src/opus.c er byte for byte den
-          # fil, workflowet hentede fra main, plus
-          # patches/opus-bitrate-range.patch. Encoderen tændes nu af
-          # configure selv frem for -DHAVE_OPUSENC.
           grep -q FindFirstFileW src/win32-glob.c
           grep -q "cannot contain" src/util.c
           grep -q HAVE_OPUSENC configure
           grep -q "max_kbps" src/opus.c
-          # Native Speex-handler. Uden den kan .spx kun læses, og kun gennem
-          # ffmpeg-pipen; med den kan den både læses og skrives af sox_ng
-          # selv. Se den lange forklaring i MSYS2-workflowet — det er de samme
-          # fem filer, og src/Makefile.in lappes med vilje i stedet for
-          # Makefile.am, så ingen automake-regel vågner på et udgivet træ.
+          if grep -qF "sleep(1)" src/waveaudio.c; then
+            echo "src/waveaudio.c kalder POSIX sleep(): GCC 14 afviser det."
+            echo "Byg 14.9.0 eller nyere, eller læg patches/waveaudio-sleep.patch ind igen."
+            exit 1
+          fi
+          echo "ok: glob, lsx_popen, opus-encoding, bitrate-interval og waveaudio"
           if [ -f src/speex.c ]; then
             echo "sox_ng-$V har selv en speex-handler."
             echo "Fjern denne patch samt -DHAVE_SPEEX og -lspeex -logg i Configure."
@@ -116,13 +260,6 @@ jobs:
           grep -q "FORMAT(speex)" src/formats.h
           grep -q "SOX_ENCODING_SPEEX" src/sox_ng.h
           grep -q "libsox_ng_la-speex.lo" src/Makefile.in
-          # MP3 i en RIFF-indpakning (fmt-kode 0x0055), som gamle ACM-encodere
-          # og `ffmpeg -c:a libmp3lame -f wav` skriver. Uden patchen siger
-          # sox_ng "file encoding 0x0055 (MP3) is not supported", selv om
-          # libmad er linket med og kunne have afkodet den. Patchen læser dem,
-          # og skriver dem med `-t wavmp3'. Se den lange forklaring i MSYS2-
-          # workflowet; det er de samme seks filer, og det er også dér
-          # røgtesten ligger, for denne exe kan ikke køres her.
           patch -p1 --fuzz=0 < ../patches/wav-mp3.patch
           grep -q "startread_mpeg_wav" src/wav.c
           grep -q "startwrite_mpeg_wav" src/wav.c
@@ -131,21 +268,11 @@ jobs:
           grep -q "data_end" src/sox_ng.h
           grep -q "mad_rewind" src/mp3-mad.c
           grep -q "lame_seek_to_start" src/mp3-lame.c
-          # 14.8.1's POSIX sleep(1) i src/waveaudio.c, som GCC 14 afviser,
-          # er væk i 14.9.0: hele stedet er skrevet om til en rigtig
-          # drain_output(), der venter på waveOut-bufferne i stedet for at
-          # sove et sekund. patches/waveaudio-sleep.patch er dermed både
-          # unødvendig og uanvendelig — dens kontekst findes ikke mere.
-          if grep -qF "sleep(1)" src/waveaudio.c; then
-            echo "src/waveaudio.c kalder POSIX sleep(): GCC 14 afviser det."
-            echo "Byg 14.9.0 eller nyere, eller læg patches/waveaudio-sleep.patch ind igen."
-            exit 1
-          fi
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
-      # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
-      # Her sad der en cache af mxe/usr. Den er fjernet igen, og det er værd
-      # at vide hvorfor, hvis nogen får den samme gode idé:
+      # Her sad der en cache af mxe/usr, med nøgle på workflowfilens indhold og
+      # ikke kun på MXE-commit'et. Den er fjernet igen, og det er værd at vide
+      # hvorfor, hvis nogen får den samme gode idé:
       #
       #   kørsel 1  23,8 min  koldt
       #   kørsel 2  36,6 min  cache gendannet, alt bygget om alligevel
@@ -190,16 +317,36 @@ jobs:
             opencore-amr libpng file libltdl mpg123 libid3tag speexdsp \
             speex ogg
 
-      # Samme flag som MSYS2-buildet, med to forskelle. Der er intet
-      # -all-static at slås med, fordi MXE's .static-mål kun har statiske
-      # biblioteker at linke imod. Og hvor MSYS2-buildet bytter rækkefølgen
-      # om inde i configure, står der her et -lopus sidst i LIBS: LIBS lægges
-      # sidst på linkerlinjen, og både libopusfile.a og libopusenc.a kalder
-      # ind i libopus, som configure selv har sat før dem i OPUS_LIBS.
+      # Der er intet -all-static at slås med, fordi MXE's .static-mål kun har
+      # statiske biblioteker at linke imod.
       #
-      # mpg123 i LIBS er LAME 4.0's skyld, som i MSYS2-buildet: configure
-      # tester lame med et bart "-lmp3lame", og LAME 4.0 bruger libmpg123, så
-      # testlinkningen fejler uden den — hvorefter lame lydløst udgår.
+      # CPPFLAGS: FLAC og twolame erklærer deres API som __declspec(dllimport)
+      # med mindre man selv definerer FLAC__NO_DLL / LIBTWOLAME_STATIC. Uden
+      # dem leder linkeren efter __imp_FLAC__* i .a-filerne og finder ingenting.
+      #
+      # opusfile.h laver #include <opus_multistream.h> i stedet for
+      # <opus/opus_multistream.h>, så headeren kun kan oversættes med
+      # include/opus i søgestien. configure.ac forsøger selv at rette op på det
+      # ved at omskrive eksisterende -I-flag, men pkg-config-flaget her er det,
+      # der med sikkerhed får opus med; uden kan den ryge lydløst ud af buildet.
+      #
+      # -DHAVE_SPEEX og -lspeex -logg hører til speex-patchen ovenfor:
+      # releasens configure kender ikke libspeex og skriver intet om den i
+      # soxconfig.h, så #if HAVE_SPEEX ville stå tom. At de to -l står i LIBS
+      # og ikke i et *_LIBS fra configure er netop det, der holder dem sidst på
+      # linkerlinjen, hvor libsox_ng.a's referencer til speex_* og ogg_* kan
+      # slås op. libspeex kalder ikke selv ind i libogg — det er kun sox' egen
+      # speex.c, der bruger begge — så rækkefølgen mellem de to er ligegyldig.
+      #
+      # -lopus sidst i LIBS: configure bygger OPUS_LIBS op som
+      # "-lopus -lopusfile -lopusenc", og både libopusfile.a og libopusenc.a
+      # kalder ind i libopus. Statisk scanner ld arkiverne fra venstre mod
+      # højre, så libopus skal stå efter dem; LIBS lægges sidst på
+      # linkerlinjen, og dér gentages den.
+      #
+      # mpg123 i LIBS er LAME 4.0's skyld: configure tester lame med et bart
+      # "-lmp3lame", og LAME 4.0 bruger libmpg123, så testlinkningen fejler
+      # uden den — hvorefter lame lydløst udgår. shlwapi følger med mpg123.
       - name: Configure
         run: |
           set -o pipefail
@@ -217,6 +364,10 @@ jobs:
             LDFLAGS="-Wl,--gc-sections" \
             LIBS="-lopus -lmpg123 -lshlwapi -lspeex -logg" 2>&1 | tee configure.out
 
+      # Et bibliotek der ikke kan findes får ikke configure til at fejle — det
+      # udgår bare af opsummeringen, og det opdages først når exe'en mangler et
+      # format. Både opus og lame er røget ud den vej. Her fejler buildet i
+      # stedet med det samme og siger hvad der mangler.
       - name: Kontrollér at alle formater kom med
         run: |
           cd "$SRC"
@@ -256,6 +407,11 @@ jobs:
       # oversættelsesenhed. Almindelig strip lader dem stå, fordi .comment
       # hverken indlæses eller refereres; det er også derfor --gc-sections
       # ikke rører dem. To forskellige problemer, to forskellige flag.
+      #
+      # --enable-replace laver kun links ved "make install", som vi ikke kører,
+      # så exe'en omdøbes i stedet her. play_ng, rec_ng og soxi_ng laves af
+      # Makefilens "all:"-mål med $(LN_S), der uden symlinks falder tilbage på
+      # cp — de er altså fulde kopier og skal strippes hver for sig.
       - name: Byg
         run: |
           export PATH="$PWD/mxe/usr/bin:$PATH"
@@ -268,12 +424,12 @@ jobs:
           printf "ustrippet:        %s\n" "$(stat -c%s /tmp/ustrippet.exe)"
           printf "strippet:         %s\n" "$(stat -c%s src/sox_ng.exe)"
           printf "GCC-strenge nu:   %s\n" "$(strings -a src/sox_ng.exe | grep -c 'GCC: (GNU)' || true)"
-          # Krydsbygget: exe'en kan ikke køres her, så røgtesten i MSYS2-
-          # workflowet er den eneste, der rent faktisk prøver Speex af.
-          # Til gengæld kan vi se, om handleren overhovedet blev linket med —
-          # --gc-sections smider sektioner, der ikke refereres, og havde
-          # FORMAT(speex) ikke stået i formats.h, ville hele speex.o ryge
-          # lydløst ud, præcis som et bibliotek der ikke blev fundet.
+          # Krydsbygget: exe'en kan ikke køres her, så den rigtige prøve er
+          # røgtest-jobbet nedenfor. Til gengæld kan vi allerede her se, om
+          # handlerne overhovedet blev linket med — --gc-sections smider
+          # sektioner, der ikke refereres, og havde FORMAT(speex) ikke stået i
+          # formats.h, ville hele speex.o ryge lydløst ud, præcis som et
+          # bibliotek der ikke blev fundet.
           if ! strings -a src/sox_ng.exe | grep -q "Ogg Speex"; then
             echo "Speex-handleren er ikke i exe'en."
             exit 1
@@ -287,6 +443,14 @@ jobs:
             exit 1
           fi
           echo "ok:               wavmp3-handleren er med"
+          if [ "${{ github.event.inputs.replace }}" = "true" ]; then
+            mv src/sox_ng.exe src/sox.exe
+          fi
+          # Alt hvad røgtesten og artefakten skal have, samlet ét sted, så
+          # download-artifact lægger det fladt ud i næste job.
+          mkdir -p dist
+          cp src/*.exe configure.out dist/
+          ls -la dist/
 
       - name: Vis configure-log hvis noget gik galt
         if: failure()
@@ -296,14 +460,291 @@ jobs:
         run: |
           export PATH="$PWD/mxe/usr/bin:$PATH"
           cd "$SRC"
-          file src/sox_ng.exe
-          echo "=== DLL'er exe'en stadig hænger på ==="
-          "$MXE_TARGET-objdump" -p src/sox_ng.exe | grep -i "DLL Name" | sort -u
+          file dist/*.exe
+          # play_ng, rec_ng og soxi_ng er fulde kopier af den samme exe, så
+          # det er nok at se på én. Navnet afhænger af `replace'.
+          if [ -f dist/sox.exe ]; then EXE=dist/sox.exe; else EXE=dist/sox_ng.exe; fi
+          echo "=== DLL'er $EXE stadig hænger på ==="
+          "$MXE_TARGET-objdump" -p "$EXE" | grep -i "DLL Name" | sort -u
+          echo "Kun KERNEL32/WINMM/msvcrt/SHELL32/SHLWAPI og lign. = fuldt statisk."
 
       - name: Upload færdig exe
         uses: actions/upload-artifact@v4
         with:
-          name: sox_ng-win64-mxe
-          path: |
-            ${{ env.SRC }}/src/*.exe
-            ${{ env.SRC }}/configure.out
+          name: sox_ng-${{ matrix.arch }}-mxe
+          path: ${{ env.SRC }}/dist/
+
+  # Røgtesten lå før i MSYS2-workflowet, som kørte på en Windows-runner og
+  # derfor kunne køre sin egen exe. MXE krydsbygger på Linux, så den prøve
+  # skal foregå her: hent artefakten ned på en Windows-runner og kør den.
+  #
+  # Begge arkitekturer testes. En 32-bit exe kører fint på en 64-bit runner
+  # gennem WOW64, så det koster ikke en ekstra maskine.
+  #
+  # shell: bash er Git Bash, som følger med windows-runneren. Det er samme
+  # MSYS2-runtime-familie som det gamle MSYS2-build brugte, så `stat -c%s',
+  # `cmp', `od', /dev/zero og `for ((i=0;...))' er alle til rådighed.
+  roegtest:
+    needs: mxe
+    # !cancelled() og ikke success(): `needs' venter på hele matricen, så uden
+    # den ville en fejlet i686-build springe røgtesten over for x86_64 også.
+    # Her kører begge ben, og det ben hvis artefakt mangler, fejler synligt i
+    # download-trinnet frem for at skjule det, der virkede.
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [win32, win64]
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Hent exe'erne fra byggejobbet
+        uses: actions/download-artifact@v4
+        with:
+          name: sox_ng-${{ matrix.arch }}-mxe
+          path: dist
+
+      - name: Kør en hurtig røgtest
+        run: |
+          cd dist
+          ls -la
+          # `replace' omdøber sox_ng.exe til sox.exe, men lader soxi_ng.exe
+          # være, så navnet slås op frem for at gættes.
+          if [ -f sox.exe ]; then SOX=./sox.exe; else SOX=./sox_ng.exe; fi
+          SOXI=./soxi_ng.exe
+          chmod +x ./*.exe
+          "$SOX" --version || true
+          "$SOX" -n -r 44100 -c 2 test.wav synth 1 sine 440 vol 0.5
+          ls -la test.wav
+          # soxi_ng er den strippede kopi, og den skifter kun opførsel på
+          # argv[0] — så den her viser både at kopien kører, og at den stadig
+          # opfører sig som soxi og ikke som sox.
+          "$SOXI" test.wav
+          # Opus-encodingen kommer fra releasen nu, men den har stadig ingen
+          # linje i configures opsummering: den afhænger af libopusenc, som
+          # configure leder efter uden at sige noget. Byggejobbet læser svaret
+          # i soxconfig.h; her kontrolleres det i praksis, for uden
+          # skrive-slottene nægter sox_ng at åbne .opus som output, og så
+          # falder rundturen wav -> opus -> wav. -r 48000 fordi opus-handleren
+          # kun tager 8/12/16/24/48 kHz; sox_ng lægger selv et rate-effekt ind.
+          # -C 96 = 96 kbps CBR.
+          "$SOX" test.wav -C 96 -r 48000 test.opus
+          ls -la test.opus
+          "$SOXI" test.opus
+          "$SOX" test.opus test-rundtur.wav
+          ls -la test-rundtur.wav
+          # 1 kbps: under sox_ng's eget gamle gulv på 6, og dermed beviset på
+          # at det udvidede interval er med — det kom fra
+          # patches/opus-bitrate-range.patch indtil 14.8.1, og ligger i selve
+          # src/opus.c fra 14.9.0. -V3 viser hvad encoderen fik at vide.
+          "$SOX" -V3 test.wav -C -1 -r 48000 lav.opus
+          ls -la lav.opus
+          "$SOXI" lav.opus
+          "$SOX" lav.opus lav-rundtur.wav
+          ls -la lav-rundtur.wav
+          # Og over det gamle loft på 256. libopus klamper selv ved 300 per
+          # kanal, så filen bliver ikke 400 kbps — pointen er at den skrives.
+          "$SOX" -V3 test.wav -C 400 -r 48000 hoej.opus
+          ls -la hoej.opus
+          "$SOXI" hoej.opus
+          # Speex. Skrivning findes kun med patchen, og læsning gik før den
+          # gennem ffmpeg-pipen. --help-format afslører hvilken handler der
+          # svarer på endelsen: står der "Ogg Speex", er det den native; stod
+          # der ffmpeg's tekst, havde rækkefølgen i formats.h tabt.
+          "$SOX" --help-format spx
+          if ! "$SOX" --help-format spx | grep -q "Ogg Speex"; then
+            echo "spx besvares ikke af den native handler"
+            exit 1
+          fi
+          # Speex tager kun 8, 16 og 32 kHz uden at brokke sig, så -r 16000;
+          # sox_ng lægger selv rate-effekten ind. Rundturen er tabsgivende,
+          # men granulepos i sidste Ogg-side siger præcis hvor mange samples
+          # der er, og både encoder og decoder skal ramme det tal.
+          "$SOX" test.wav -r 16000 roegtest-16k.wav
+          "$SOX" roegtest-16k.wav roegtest.spx
+          ls -la roegtest.spx
+          "$SOXI" roegtest.spx
+          "$SOX" roegtest.spx roegtest-rundtur.wav
+          ind=$("$SOXI" -s roegtest-16k.wav)
+          ud=$("$SOXI" -s roegtest-rundtur.wav)
+          echo "samples ind: $ind, ud: $ud"
+          if [ "$ind" != "$ud" ]; then
+            echo "Speex-rundturen tabte eller tilføjede samples"
+            exit 1
+          fi
+          # Fra en pipe er filen ikke søgbar, så handleren kan hverken læse
+          # sidste sides granulepos på forhånd eller spole tilbage. Først
+          # kontrolleres at pipe-læsning overhovedet virker i dette miljø —
+          # med w64devkit's runtime falder sox_ng's stdin-læsning fra hinanden
+          # for alle formater, wav inklusive, og så siger en fejl her intet om
+          # Speex. Virker wav, skal spx også virke.
+          if cat roegtest-16k.wav | "$SOX" -t wav - pipe-wav.wav 2>/dev/null &&
+             [ "$("$SOXI" -s pipe-wav.wav)" = "$ind" ]; then
+            cat roegtest.spx | "$SOX" -t spx - pipe-rundtur.wav
+            udp=$("$SOXI" -s pipe-rundtur.wav)
+            echo "samples fra pipe: $udp"
+            if [ "$udp" != "$ud" ]; then
+              echo "Speex fra pipe gav $udp samples, fra fil $ud"
+              exit 1
+            fi
+            echo "ok: ogsaa korrekt fra en pipe"
+          else
+            echo "springer pipe-testen over: stdin-laesning virker ikke her i det hele taget"
+          fi
+          # -C er pakket som i opus.c: heltalsdelen er kvaliteten 0-10,
+          # fortegnet vælger CBR eller VBR (negativ er VBR), og decimaldelen
+          # er encoderens complexity 0-10, hvor intet komma betyder 10.
+          "$SOX" -V3 roegtest-16k.wav -c 1 -C 3 lav-q.spx
+          "$SOX" -V3 roegtest-16k.wav -c 1 -C 10 hoej-q.spx
+          "$SOX" -V3 roegtest-16k.wav -c 1 -C -8 vbr.spx
+          "$SOX" -V3 roegtest-16k.wav -c 1 -C 8.3 komp3.spx
+          "$SOX" -V3 roegtest-16k.wav -c 1 -C 8 komp10.spx
+          ls -la lav-q.spx hoej-q.spx vbr.spx komp3.spx komp10.spx
+          if [ "$(stat -c%s lav-q.spx)" -ge "$(stat -c%s hoej-q.spx)" ]; then
+            echo "-C slår ikke igennem: kvalitet 3 fylder ikke mindre end 10"
+            exit 1
+          fi
+          # Complexity ændrer kun hvor grundigt encoderen søger, ikke bitraten,
+          # så de to filer skal fylde det samme og alligevel være forskellige.
+          # Var complexity tavst faldet på gulvet, ville de være ens.
+          if [ "$(stat -c%s komp3.spx)" != "$(stat -c%s komp10.spx)" ]; then
+            echo "complexity ændrede bitraten, hvilket den ikke skal"
+            exit 1
+          fi
+          if cmp -s komp3.spx komp10.spx; then
+            echo "-C 8.3 og -C 8 gav samme fil: complexity slår ikke igennem"
+            exit 1
+          fi
+          # Fortegnet skal skifte tilstand; -V3 siger selv hvilken det blev.
+          if ! "$SOX" -V3 roegtest-16k.wav -c 1 -C -8 vbr2.spx 2>&1 |
+               grep -q "VBR"; then
+            echo "-C -8 gav ikke VBR"
+            exit 1
+          fi
+          # Uden for 0-10 skal begge fortegn afvises.
+          for ugyldig in 11 -11; do
+            if "$SOX" roegtest-16k.wav -C $ugyldig ugyldig.spx 2>/dev/null; then
+              echo "-C $ugyldig blev accepteret, men skulle vaere afvist"
+              exit 1
+            fi
+          done
+          # MP3 i en RIFF-indpakning, fmt-kode 0x0055. Ingen af de encodere,
+          # der er med her, laver sådan en fil, så den bygges i hånden: sox_ng
+          # koder lyden til MP3, og resten er ren header. le() skriver et tal
+          # ud som rå little-endian bytes. Vejen om ad "%b" og "\0nnn" er den
+          # der virker: kommandosubstitutionen giver teksten "000", som printf
+          # så laver om til en NUL-byte — omvendt ville NUL'en falde på gulvet
+          # undervejs, for kommandosubstitution kan ikke bære den.
+          "$SOX" test.wav -C 128 roegtest.mp3
+          le() {  # le <tal> <antal bytes>
+            local v=$1 n=$2 i
+            for ((i = 0; i < n; i++)); do
+              printf '%b' "\0$(printf '%03o' $(( (v >> (8 * i)) & 255 )))"
+            done
+          }
+          mp3size=$(stat -c%s roegtest.mp3)
+          samples=$("$SOXI" -s test.wav)
+          {
+            printf 'RIFF'; le $((4 + 8+30 + 8+4 + 8+mp3size)) 4; printf 'WAVE'
+            printf 'fmt '; le 30 4
+            le 85 2         # wFormatTag = WAVE_FORMAT_MPEGLAYER3
+            le 2 2          # nChannels
+            le 44100 4      # nSamplesPerSec
+            le 16000 4      # nAvgBytesPerSec = 128 kbps
+            le 1 2          # nBlockAlign
+            le 0 2          # wBitsPerSample: 0, som i alle den slags filer
+            le 12 2         # cbSize: resten er MPEGLAYER3WAVEFORMAT
+            le 1 2          # wID = MPEGLAYER3_ID_MP3
+            le 2 4          # fdwFlags = MPEGLAYER3_FLAG_PADDING_OFF
+            le 1 2          # nBlockSize
+            le 1 2          # nFramesPerBlock
+            le 1393 2       # nCodecDelay
+            printf 'fact'; le 4 4; le $((samples / 2)) 4
+            printf 'data'; le $mp3size 4
+          } > mp3i.wav
+          cat roegtest.mp3 >> mp3i.wav
+          "$SOXI" mp3i.wav
+          if ! "$SOXI" -e mp3i.wav | grep -qi MPEG; then
+            echo "0x0055 blev ikke genkendt som MPEG-lyd"
+            exit 1
+          fi
+          # Den samme MP3-strøm med og uden RIFF-indpakningen skal give
+          # nøjagtig den samme lyd ud. Det er hele pointen, og det er også
+          # den eneste facitliste vi har, når encoderens forsinkelse er med.
+          "$SOX" mp3i.wav mp3i-ud.wav
+          "$SOX" roegtest.mp3 bar-ud.wav
+          echo "samples: indpakket $("$SOXI" -s mp3i-ud.wav), bar $("$SOXI" -s bar-ud.wav)"
+          if ! cmp mp3i-ud.wav bar-ud.wav; then
+            echo "MP3 i wav gav ikke det samme som den bare mp3"
+            exit 1
+          fi
+          # Og en kopi med en chunk hængt bag data-chunken, fyldt med 0xff,
+          # som ligner starten på et MPEG-sync-ord. Uden ft->data_end læser
+          # libmad videre ind i den og lægger en ramme støj til.
+          cp mp3i.wav mp3i-hale.wav
+          { printf 'LIST'; le 44 4; printf 'INFO'
+            printf 'ISFT'; le 32 4; head -c 32 /dev/zero | tr '\000' '\377'
+          } >> mp3i-hale.wav
+          "$SOX" mp3i-hale.wav hale-ud.wav
+          if ! cmp hale-ud.wav mp3i-ud.wav; then
+            echo "en chunk efter data-chunken slap med ind i lyden"
+            exit 1
+          fi
+          echo "ok: MP3 i RIFF-indpakning, ogsaa med en chunk bagefter"
+          # Spoling: seek_wav sender den videre til seek_mad, som tæller
+          # rammer fra ft->data_start og ikke fra filens begyndelse.
+          "$SOX" mp3i.wav klip-indpakket.wav trim 0.4
+          "$SOX" roegtest.mp3 klip-bar.wav trim 0.4
+          cmp klip-indpakket.wav klip-bar.wav
+          echo "ok: trim rammer det samme sted i begge"
+
+          # Og den anden vej: -t wavmp3 lægger MP3'en i data-chunken selv.
+          "$SOX" test.wav -t wavmp3 skriv.wav
+          "$SOXI" skriv.wav
+          if ! "$SOXI" -e skriv.wav | grep -qi MPEG; then
+            echo "-t wavmp3 skrev ikke MPEG-lyd"
+            exit 1
+          fi
+          # Samme lyd som en bar mp3 med samme indstillinger. Det er den
+          # eneste facitliste der findes, når encoderens egen forsinkelse er
+          # med i tallet, og den viser samtidig at det er den samme encoder.
+          "$SOX" test.wav bar.mp3
+          "$SOX" skriv.wav skriv-ud.wav
+          "$SOX" bar.mp3 bar-mp3-ud.wav
+          if ! cmp skriv-ud.wav bar-mp3-ud.wav; then
+            echo "-t wavmp3 gav ikke samme lyd som en bar mp3"
+            exit 1
+          fi
+          # VBR. Her spoler LAME tilbage til starten af MPEG-strømmen for at
+          # skrive sin Xing-ramme; uden ft->data_start lander den skrivning
+          # oven i RIFF-headeren, og så er filen ikke en wav længere.
+          "$SOX" test.wav -C -2 -t wavmp3 vbr.wav
+          if [ "$(head -c 4 vbr.wav)" != "RIFF" ]; then
+            echo "VBR-taggen blev skrevet oven i RIFF-headeren"
+            head -c 16 vbr.wav | od -An -tx1
+            exit 1
+          fi
+          "$SOX" vbr.wav vbr-ud.wav
+          ls -la skriv.wav vbr.wav
+          # Og det vigtigste: det her må ikke smitte af på almindelig
+          # wav-udskrivning. `sox_ng x.mp3 x.wav` skal stadig give PCM, ikke en
+          # MP3 i en RIFF-indpakning. Det er hele grunden til at wavmp3 er en
+          # handler for sig.
+          "$SOX" bar.mp3 fra-mp3.wav
+          if ! "$SOXI" -e fra-mp3.wav | grep -qi "Signed Integer PCM"; then
+            echo "mp3 ind gav ikke PCM ud i en almindelig .wav:"
+            "$SOXI" fra-mp3.wav
+            exit 1
+          fi
+          echo "ok: -t wavmp3 skriver, og almindelig .wav er uroert"
+
+          # Glob med danske tegn i navnet. Uden win32-glob-rettelsen får
+          # sox_ng navnet tilbage fra Windows i CP1252, mens dens egen fopen
+          # venter UTF-8, og det her fejler med "No such file or directory".
+          cp test.wav "røgtest æøå.wav"
+          "$SOX" "røgtest*.wav" -n
+          # Og den anden vej: danske tegn i selve mønsteret.
+          "$SOX" "røgtest æøå.*" -n
