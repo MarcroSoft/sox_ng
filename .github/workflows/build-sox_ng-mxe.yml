@@ -17,7 +17,7 @@ on:
     inputs:
       version:
         description: "sox_ng-version fra Codeberg-releases"
-        default: "14.8.1"
+        default: "14.9.0"
 
 env:
   MXE_COMMIT: 98d61fc1fe02dc804320f53804d5231f4a98b6ce
@@ -83,20 +83,24 @@ jobs:
           wget -q "https://codeberg.org/sox_ng/sox_ng/releases/download/sox_ng-$V/sox_ng-$V.tar.gz"
           tar xzf "sox_ng-$V.tar.gz"
           cd "sox_ng-$V"
-          OPUS_C=5caa22dfc66fea186594cf20c96db2b1362ec00a
-          wget -q -O src/opus.c \
-            "https://codeberg.org/sox_ng/sox_ng/raw/commit/$OPUS_C/src/opus.c"
-          echo "705208e094631e780d20fcfc490f9f98dd5443bb1f777a9b6c792668001ec4ca  src/opus.c" | sha256sum -c -
-          patch -p1 --fuzz=0 < ../patches/opus-bitrate-range.patch
-          # win32-glob.c's UTF-8-glob og lsx_popen()'s anførselstegn om
-          # filnavnet er begge landet opstrøms i 14.8.1 — se den længere
-          # forklaring i MSYS2-workflowet. Patchene ville nu fejle med
-          # "Reversed (or previously applied) patch detected!", så her
-          # kontrolleres blot at rettelserne er der. De fejler, hvis version
-          # sættes tilbage til en release uden dem; patchfilerne ligger
-          # stadig i patches/ til det tilfælde.
+          # Fire rettelser, der hidtil kom herfra, ligger i selve releasen nu
+          # — se den længere forklaring i MSYS2-workflowet. Patchene ville
+          # fejle med "Reversed (or previously applied) patch detected!" eller
+          # slet ikke finde deres kontekst, så her kontrolleres blot, at koden
+          # er der. Patchfilerne bliver liggende i patches/, men version kan
+          # ikke bare sættes tilbage: speex-patchens formats.c-hunks passer kun
+          # på 14.9.0's ombrudte fil.
+          #
+          # 14.8.1 tog win32-glob.c's UTF-8-glob og lsx_popen()'s
+          # anførselstegn om filnavnet. 14.9.0 tog opus-encoderen og det
+          # udvidede bitrate-interval: dens src/opus.c er byte for byte den
+          # fil, workflowet hentede fra main, plus
+          # patches/opus-bitrate-range.patch. Encoderen tændes nu af
+          # configure selv frem for -DHAVE_OPUSENC.
           grep -q FindFirstFileW src/win32-glob.c
           grep -q "cannot contain" src/util.c
+          grep -q HAVE_OPUSENC configure
+          grep -q "max_kbps" src/opus.c
           # Native Speex-handler. Uden den kan .spx kun læses, og kun gennem
           # ffmpeg-pipen; med den kan den både læses og skrives af sox_ng
           # selv. Se den lange forklaring i MSYS2-workflowet — det er de samme
@@ -127,12 +131,16 @@ jobs:
           grep -q "data_end" src/sox_ng.h
           grep -q "mad_rewind" src/mp3-mad.c
           grep -q "lame_seek_to_start" src/mp3-lame.c
-          # 14.8.1 lagde et POSIX sleep(1) ind i src/waveaudio.c, som kun
-          # bygges på Windows og hvor intet erklærer den. GCC 14 og nyere
-          # gør det til en fejl. Se den længere forklaring i MSYS2-
-          # workflowet; patchen bytter det til Win32's Sleep(1000).
-          patch -p1 --fuzz=0 < ../patches/waveaudio-sleep.patch
-          grep -q "Sleep(1000)" src/waveaudio.c
+          # 14.8.1's POSIX sleep(1) i src/waveaudio.c, som GCC 14 afviser,
+          # er væk i 14.9.0: hele stedet er skrevet om til en rigtig
+          # drain_output(), der venter på waveOut-bufferne i stedet for at
+          # sove et sekund. patches/waveaudio-sleep.patch er dermed både
+          # unødvendig og uanvendelig — dens kontekst findes ikke mere.
+          if grep -qF "sleep(1)" src/waveaudio.c; then
+            echo "src/waveaudio.c kalder POSIX sleep(): GCC 14 afviser det."
+            echo "Byg 14.9.0 eller nyere, eller læg patches/waveaudio-sleep.patch ind igen."
+            exit 1
+          fi
           echo "SRC=sox_ng-$V" >> $GITHUB_ENV
 
       # Nøglen hænger på workflowfilens indhold, ikke kun på MXE-commit'et:
@@ -182,10 +190,16 @@ jobs:
             opencore-amr libpng file libltdl mpg123 libid3tag speexdsp \
             speex ogg
 
-      # Samme flag som MSYS2-buildet, med to forskelle: der er intet
+      # Samme flag som MSYS2-buildet, med to forskelle. Der er intet
       # -all-static at slås med, fordi MXE's .static-mål kun har statiske
-      # biblioteker at linke imod, og MXE's lame er 4.0 ligesom vores, så
-      # mpg123 skal med i LIBS af samme grund som dér.
+      # biblioteker at linke imod. Og hvor MSYS2-buildet bytter rækkefølgen
+      # om inde i configure, står der her et -lopus sidst i LIBS: LIBS lægges
+      # sidst på linkerlinjen, og både libopusfile.a og libopusenc.a kalder
+      # ind i libopus, som configure selv har sat før dem i OPUS_LIBS.
+      #
+      # mpg123 i LIBS er LAME 4.0's skyld, som i MSYS2-buildet: configure
+      # tester lame med et bart "-lmp3lame", og LAME 4.0 bruger libmpg123, så
+      # testlinkningen fejler uden den — hvorefter lame lydløst udgår.
       - name: Configure
         run: |
           set -o pipefail
@@ -198,10 +212,10 @@ jobs:
             --with-waveaudio \
             --disable-dl-lame --disable-dl-mad --disable-dl-amrnb --disable-dl-amrwb \
             PKG_CONFIG="$MXE_TARGET-pkg-config" \
-            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_OPUSENC=1 -DHAVE_SPEEX=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
+            CPPFLAGS="-DFLAC__NO_DLL -DLIBTWOLAME_STATIC -DHAVE_SPEEX=1 $($MXE_TARGET-pkg-config --cflags opusfile)" \
             CFLAGS="-Os -ffunction-sections -fdata-sections" \
             LDFLAGS="-Wl,--gc-sections" \
-            LIBS="-lopusenc -lopus -lmpg123 -lshlwapi -lspeex -logg" 2>&1 | tee configure.out
+            LIBS="-lopus -lmpg123 -lshlwapi -lspeex -logg" 2>&1 | tee configure.out
 
       - name: Kontrollér at alle formater kom med
         run: |
@@ -227,6 +241,16 @@ jobs:
             exit 1
           fi
           echo "ok:      speexdsp er med"
+          # opus-opsummeringen siger kun "yes" til læsedelen: configure leder
+          # efter libopusenc uden at skrive et ord om resultatet. Uden den kan
+          # .opus stadig læses, så intet format mangler i listen ovenfor —
+          # exe'en kan bare ikke skrive .opus. Svaret står i soxconfig.h.
+          if ! grep -q "define HAVE_OPUSENC 1" src/soxconfig.h; then
+            echo "libopusenc kom ikke med: .opus kan kun læses."
+            grep -n "OPUSENC" src/soxconfig.h || true
+            exit 1
+          fi
+          echo "ok:      libopusenc er med, .opus kan skrives"
 
       # -R .comment fjerner de 865 kopier af "GCC: (GNU) 11.5.0" — én per
       # oversættelsesenhed. Almindelig strip lader dem stå, fordi .comment
