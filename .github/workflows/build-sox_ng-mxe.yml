@@ -63,26 +63,41 @@ jobs:
         uses: actions/checkout@v4
 
       # Listen er MXE's egen for "Debian and derivatives", taget fra deres
-      # docs. libclang-dev er udeladt: den fylder omkring en gigabyte og
-      # bruges kun af pakker, vi ikke bygger. Mangler der noget, siger
-      # check-requirements nedenfor det, længe før det koster tid.
+      # docs, med to rettelser. libclang-dev er udeladt: den fylder omkring en
+      # gigabyte og bruges kun af pakker, vi ikke bygger. Mangler der noget,
+      # siger check-requirements nedenfor det, længe før det koster tid.
+      #
+      # Og libgdk-pixbuf2.0-bin står hvor MXE's docs siger
+      # libgdk-pixbuf2.0-dev. Af hele den pakke er det kun ét program, MXE
+      # bruger — `gdk-pixbuf-csource' står i REQUIREMENTS i deres Makefile —
+      # og det ligger i -bin, ikke i -dev. Det blev aktuelt 2026-11-18, hvor
+      # ubuntu-latest skiftede fra 24.04 til 26.04: dér findes
+      # libgdk-pixbuf2.0-dev ikke mere, og apt faldt med
+      #
+      #   E: Package 'libgdk-pixbuf2.0-dev' has no installation candidate
+      #
+      # apt foreslog selv libgdk-pixbuf-xlib-2.0-dev, men det er en Replaces
+      # for xlib-delen og har ikke gdk-pixbuf-csource. -bin findes i både
+      # 24.04 og 26.04, så den binder os ikke til ét runner-billede.
       #
       # g++-multilib og libc6-dev-i386 er ikke pynt: de skal være der, for at
       # i686-toolchainen kan bygges på en 64-bit vært.
       - name: Forudsætninger
         run: |
-          # ubuntu-24.04-billedet har Microsofts egne apt-kilder med —
-          # azure-cli og packages.microsoft.com/ubuntu/24.04/prod. De svarede
-          # 403 Forbidden 2026-09-02, og `apt-get update' fejler på hele
-          # kørslen, når bare én kilde ikke kan hentes, så trinnet her faldt
-          # på noget, buildet slet ikke bruger. Ingen af MXE's afhængigheder
-          # kommer derfra; de fjernes frem for at blive hentet.
+          # Runner-billedet har Microsofts egne apt-kilder med — azure-cli og
+          # packages.microsoft.com. De svarede 403 Forbidden 2026-09-02, og
+          # `apt-get update' fejler på hele kørslen, når bare én kilde ikke
+          # kan hentes, så trinnet her faldt på noget, buildet slet ikke
+          # bruger. Ingen af MXE's afhængigheder kommer derfra; de fjernes
+          # frem for at blive hentet. Globberne rammer uanset hvilken
+          # Ubuntu-udgave billedet er, og `rm -f' brokker sig ikke, hvis
+          # filerne er væk en dag.
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.* \
                      /etc/apt/sources.list.d/azure-cli.*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake autopoint bash bison bzip2 flex g++ g++-multilib \
-            gettext git gperf intltool libc6-dev-i386 libgdk-pixbuf2.0-dev \
+            gettext git gperf intltool libc6-dev-i386 libgdk-pixbuf2.0-bin \
             libltdl-dev libgl-dev libpcre2-dev libssl-dev libtool-bin \
             libxml-parser-perl lzip make openssl p7zip-full patch perl python3 \
             python3-mako python3-packaging python3-setuptools python-is-python3 \
