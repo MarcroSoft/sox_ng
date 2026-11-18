@@ -14,9 +14,14 @@ name: sox_ng krydsbygget med MXE
 # ikke msvcrt, og mingw32 er i forvejen skrumpet til 83 pakker uden ét codec,
 # så 32 bit kunne slet ikke laves den vej.
 #
-# MXE har ingen af de problemer: alt bygges fra kilde, mingw-w64 14.0.0 uden
-# --with-default-msvcrt (altså msvcrt), og begge tripletter — i686 og x86_64 —
-# er førsteklasses mål. Derfor matricen nedenfor.
+# MXE har ingen af de problemer: alt bygges fra kilde, og begge tripletter —
+# i686 og x86_64 — er førsteklasses mål. Derfor matricen nedenfor.
+#
+# msvcrt er MXE's eget valg, ikke mingw-w64's: mingw-w64 skiftede standarden
+# til UCRT i v12.0.0 (2024-05-22, commit 82b8edc101). MXE sætter
+# --with-default-msvcrt=msvcrt eksplicit i src/gcc.mk, og den resulterende
+# exe importerer msvcrt.dll. Bumpes MXE_COMMIT, er det den linje, der afgør
+# om det stadig er msvcrt — "Hvad blev det til" nedenfor viser DLL'erne.
 #
 # Prisen er tid. Til gengæld er hele træet pinnet og reproducerbart, og
 # pakkerne er nye — MXE's færdigbyggede apt-pakker er sidst rørt i januar 2021
